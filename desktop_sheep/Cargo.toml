@@ -1,0 +1,20 @@
+[package]
+name = "desktop_sheep"
+version = "0.1.0"
+edition = "2021"
+description = "Desktop-Schaf: transparentes Overlay-Sheep an der Bildschirmunterkante (Linux/X11, gtk4-rs)"
+
+[dependencies]
+gtk4 = { version = "0.9", features = ["v4_14"] }
+gdk4 = "0.9"
+cairo-rs = { version = "0.20", features = ["png"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11 = { version = "2.21", features = ["xlib"] }
+gdk4-x11 = { version = "0.9", features = ["xlib"] }
+ksni = "0.2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
