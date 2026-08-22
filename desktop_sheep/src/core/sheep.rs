@@ -187,6 +187,14 @@ impl Sheep {
                 if self.repeats_done >= cur.repeat {
                     self.repeats_done = 0;
                     let nxt = pick_next(cur.next, &mut self.rng);
+                    // Facing beim Ende der aktuellen Animation umkehren
+                    // (z. B. Rotate1A -> Rotate1B mit gedrehtem Sprite).
+                    if cur.flip_on_end {
+                        self.facing = match self.facing {
+                            Facing::Left => Facing::Right,
+                            Facing::Right => Facing::Left,
+                        };
+                    }
                     if nxt != self.anim {
                         self.anim = nxt;
                         self.frame_idx = 0;
@@ -215,12 +223,12 @@ impl Sheep {
             if self.x <= min_x {
                 if !self.try_cross(segments, area_dims, Facing::Left) {
                     self.x = min_x;
-                    self.facing = Facing::Right;
+                    self.begin_turn();
                 }
             } else if self.x >= max_x {
                 if !self.try_cross(segments, area_dims, Facing::Right) {
                     self.x = max_x;
-                    self.facing = Facing::Left;
+                    self.begin_turn();
                 }
             }
         }
@@ -236,6 +244,16 @@ impl Sheep {
                 .unwrap_or(0)
         };
         self.y = (bottom as u32).saturating_sub(TILE_H) as f32;
+    }
+
+    /// Startet die sanfte Umdreh-Sequenz (Rotate1A -> Rotate1B -> Walk).
+    /// Das eigentliche Facing-Flippen erledigt der Zustandsübergang am Ende
+    /// von Rotate1A (dank flip_on_end=true).
+    fn begin_turn(&mut self) {
+        self.anim = AnimId::Rotate1A;
+        self.frame_idx = 0;
+        self.frame_elapsed_ms = 0;
+        self.repeats_done = 0;
     }
 
     /// Advance frames der aktuellen Animation ohne jegliche Zustandsübergänge.

@@ -13,6 +13,12 @@ pub fn frame_to_tile(index: u32) -> (u32, u32) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnimId {
     Walk,
+    /// Sanftes Umdrehen, Teil 1 (id=2): Kopf/Körper dreht sich.
+    /// `flip_on_end` schaltet am Ende die Facing-Richtung um.
+    Rotate1A,
+    /// Sanftes Umdrehen, Teil 2 (id=3): Rückweg in die neue Richtung,
+    /// danach zurück zu Walk.
+    Rotate1B,
     YawnSleep,
     Sleep,
     WakeUp,
@@ -34,6 +40,9 @@ pub struct AnimDef {
     pub repeat: u32,
     /// Gewichtete Nachfolge­zustände (Summe der Gewichte = 100).
     pub next: &'static [(u32, AnimId)],
+    /// Kehrt beim Zustandswechsel die Facing-Richtung um. Für Rotate1A: die
+    /// visuelle Drehung endet mit gespiegeltem Sprite in der neuen Richtung.
+    pub flip_on_end: bool,
 }
 
 /// Walk (animations.xml id=1): 2 Frames links-gerichtet, 200 ms, dx=-2.
@@ -44,6 +53,27 @@ pub const WALK: AnimDef = AnimDef {
     dx_per_tick: 2,
     repeat: 6,
     next: &[(85, AnimId::Walk), (10, AnimId::YawnSleep), (5, AnimId::Eat)],
+    flip_on_end: false,
+};
+
+/// Rotate1A (id=2): Drehung Teil 1 – Frames 3 → 9 → 10, dann Facing flippen.
+pub const ROTATE1A: AnimDef = AnimDef {
+    frames: &[3, 9, 10],
+    interval_ms: 180,
+    dx_per_tick: 0,
+    repeat: 1,
+    next: &[(100, AnimId::Rotate1B)],
+    flip_on_end: true,
+};
+
+/// Rotate1B (id=3): Drehung Teil 2 – Frames 10 → 9 → 3, dann in Walk.
+pub const ROTATE1B: AnimDef = AnimDef {
+    frames: &[10, 9, 3],
+    interval_ms: 180,
+    dx_per_tick: 0,
+    repeat: 1,
+    next: &[(100, AnimId::Walk)],
+    flip_on_end: false,
 };
 
 /// Sleep1a (id=15) ohne Loop-Teil: gähnen, hinlegen, augen zu. Danach → Sleep.
@@ -53,6 +83,7 @@ pub const YAWN_SLEEP: AnimDef = AnimDef {
     dx_per_tick: 0,
     repeat: 1,
     next: &[(100, AnimId::Sleep)],
+    flip_on_end: false,
 };
 
 /// Schlaf-Loop: ruhig atmen (Frames 0/1). Läuft im Regelfall so lange, bis
@@ -65,6 +96,7 @@ pub const SLEEP: AnimDef = AnimDef {
     dx_per_tick: 0,
     repeat: 300,
     next: &[(100, AnimId::WakeUp)],
+    flip_on_end: false,
 };
 
 /// Sleep1b (id=16): aufwachen, hochstehen.
@@ -74,6 +106,7 @@ pub const WAKE_UP: AnimDef = AnimDef {
     dx_per_tick: 0,
     repeat: 1,
     next: &[(100, AnimId::Walk)],
+    flip_on_end: false,
 };
 
 /// Eat (id=26): grasen.
@@ -83,6 +116,7 @@ pub const EAT: AnimDef = AnimDef {
     dx_per_tick: 0,
     repeat: 1,
     next: &[(100, AnimId::Walk)],
+    flip_on_end: false,
 };
 
 /// Drag (id=4): Zappeln, während der User das Schaf hält. Loop, keine
@@ -93,6 +127,7 @@ pub const DRAG: AnimDef = AnimDef {
     dx_per_tick: 0,
     repeat: 1,
     next: &[(100, AnimId::Drag)],
+    flip_on_end: false,
 };
 
 /// Fall (id=5): Einzel-Frame während des freien Falls.
@@ -102,6 +137,7 @@ pub const FALL: AnimDef = AnimDef {
     dx_per_tick: 0,
     repeat: 1,
     next: &[(100, AnimId::Walk)],
+    flip_on_end: false,
 };
 
 /// FallHard (id=10): kurzer Landungs-Bumper, dann zurück zu Walk.
@@ -111,11 +147,14 @@ pub const FALL_HARD: AnimDef = AnimDef {
     dx_per_tick: 0,
     repeat: 1,
     next: &[(100, AnimId::Walk)],
+    flip_on_end: false,
 };
 
 pub fn def(id: AnimId) -> &'static AnimDef {
     match id {
         AnimId::Walk => &WALK,
+        AnimId::Rotate1A => &ROTATE1A,
+        AnimId::Rotate1B => &ROTATE1B,
         AnimId::YawnSleep => &YAWN_SLEEP,
         AnimId::Sleep => &SLEEP,
         AnimId::WakeUp => &WAKE_UP,
