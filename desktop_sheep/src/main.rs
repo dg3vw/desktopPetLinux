@@ -3,13 +3,14 @@ mod platform;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::core::anim::SpriteColor;
 use crate::core::geometry::ground_segments;
 use crate::core::sheep::Sheep;
 use crate::platform::{CurrentPlatform, Platform};
 
 #[derive(Debug)]
 enum Command {
-    Run { n_sheep: usize },
+    Run { n_sheep: usize, color: SpriteColor },
     InstallAutostart,
     RemoveAutostart,
     Help,
@@ -21,15 +22,18 @@ fn print_help() {
         "desktop_sheep – Overlay-Schafe an der Bildschirmunterkante.\n\
          \n\
          Nutzung:\n  \
-           {bin} [--sheep N]         starten (Standard: 1 Schaf)\n  \
-           {bin} --install-autostart .desktop-Datei in ~/.config/autostart/ anlegen\n  \
-           {bin} --remove-autostart  .desktop-Datei entfernen\n  \
-           {bin} --help              diese Hilfe\n"
+           {bin} [--sheep N] [--color FARBE]  starten (Standard: 1 Schaf, Originalfarbe)\n  \
+           {bin} --install-autostart          .desktop-Datei in ~/.config/autostart/ anlegen\n  \
+           {bin} --remove-autostart           .desktop-Datei entfernen\n  \
+           {bin} --help                       diese Hilfe\n\
+         \n\
+         FARBE: default | blue | green | orange | pink | purple | red | yellow\n"
     );
 }
 
 fn parse_args() -> Command {
     let mut n_sheep: usize = 1;
+    let mut color: SpriteColor = SpriteColor::Default;
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -41,13 +45,26 @@ fn parse_args() -> Command {
                     n_sheep = v.parse().unwrap_or(1).max(1);
                 }
             }
+            "--color" => {
+                let Some(v) = it.next() else {
+                    eprintln!("--color: Farbe fehlt");
+                    return Command::Help;
+                };
+                match SpriteColor::from_name(&v) {
+                    Some(c) => color = c,
+                    None => {
+                        eprintln!("Unbekannte Farbe: {v}");
+                        return Command::Help;
+                    }
+                }
+            }
             other => {
                 eprintln!("Unbekanntes Argument: {other}");
                 return Command::Help;
             }
         }
     }
-    Command::Run { n_sheep }
+    Command::Run { n_sheep, color }
 }
 
 fn autostart_path() -> Option<std::path::PathBuf> {
@@ -117,12 +134,12 @@ fn main() {
             }
             return;
         }
-        Command::Run { n_sheep } => run_overlay(n_sheep),
+        Command::Run { n_sheep, color } => run_overlay(n_sheep, color),
     }
 }
 
-fn run_overlay(n_sheep: usize) {
-    let platform = CurrentPlatform::new();
+fn run_overlay(n_sheep: usize, color: SpriteColor) {
+    let platform = CurrentPlatform::with_color(color);
     let monitors = platform.monitor_geometry();
     if monitors.is_empty() {
         eprintln!("Keine Monitore gefunden – bricht ab.");

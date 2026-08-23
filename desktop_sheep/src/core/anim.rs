@@ -10,6 +10,52 @@ pub fn frame_to_tile(index: u32) -> (u32, u32) {
     (index % TILES_X, index / TILES_X)
 }
 
+/// Farbvariante des Sprite-Sheets. `Default` = das originale esheep64
+/// (`assets/sheep.png`); die übrigen sind aus den Pets-Ordnern des
+/// Upstream-Repos extrahiert und liegen als `sheep_<farbe>.png` in `assets/`.
+/// Alle Varianten teilen die Frame-Nummerierung der ersten 11 Zeilen mit dem
+/// Original, weshalb dieselbe Animations-Tabelle funktioniert.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpriteColor {
+    Default,
+    Blue,
+    Green,
+    Orange,
+    Pink,
+    Purple,
+    Red,
+    Yellow,
+}
+
+impl SpriteColor {
+    pub fn from_name(s: &str) -> Option<Self> {
+        Some(match s.to_ascii_lowercase().as_str() {
+            "default" | "original" | "white" => Self::Default,
+            "blue" => Self::Blue,
+            "green" => Self::Green,
+            "orange" => Self::Orange,
+            "pink" => Self::Pink,
+            "purple" => Self::Purple,
+            "red" => Self::Red,
+            "yellow" => Self::Yellow,
+            _ => return None,
+        })
+    }
+
+    pub fn png_bytes(self) -> &'static [u8] {
+        match self {
+            Self::Default => include_bytes!("../../assets/sheep.png"),
+            Self::Blue => include_bytes!("../../assets/sheep_blue.png"),
+            Self::Green => include_bytes!("../../assets/sheep_green.png"),
+            Self::Orange => include_bytes!("../../assets/sheep_orange.png"),
+            Self::Pink => include_bytes!("../../assets/sheep_pink.png"),
+            Self::Purple => include_bytes!("../../assets/sheep_purple.png"),
+            Self::Red => include_bytes!("../../assets/sheep_red.png"),
+            Self::Yellow => include_bytes!("../../assets/sheep_yellow.png"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnimId {
     Walk,

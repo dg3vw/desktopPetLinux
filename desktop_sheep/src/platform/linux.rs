@@ -31,11 +31,18 @@ struct DragState {
     start_root: (i32, i32),
 }
 
-pub struct LinuxPlatform;
+pub struct LinuxPlatform {
+    sprite_bytes: &'static [u8],
+}
 
 impl LinuxPlatform {
+    #[allow(dead_code)]
     pub fn new() -> Self {
-        Self
+        Self::with_color(crate::core::anim::SpriteColor::Default)
+    }
+
+    pub fn with_color(color: crate::core::anim::SpriteColor) -> Self {
+        Self { sprite_bytes: color.png_bytes() }
     }
 }
 
@@ -78,9 +85,10 @@ impl Platform for LinuxPlatform {
 
         let sheeps = Rc::new(RefCell::new(sheeps));
         let tick = Rc::new(RefCell::new(tick));
+        let sprite_bytes = self.sprite_bytes;
 
         app.connect_activate(move |app| {
-            build_ui(app, sheeps.clone(), tick.clone(), tick_ms);
+            build_ui(app, sheeps.clone(), tick.clone(), tick_ms, sprite_bytes);
         });
 
         // SIGINT (Ctrl+C im Terminal) sauber abfangen und Application beenden.
@@ -121,6 +129,7 @@ fn build_ui<TickFn>(
     sheeps: Rc<RefCell<Vec<Sheep>>>,
     tick: Rc<RefCell<TickFn>>,
     tick_ms: u32,
+    sprite_bytes: &'static [u8],
 ) where
     TickFn: FnMut(&mut [Sheep], u32, &[(i32, i32)]) + 'static,
 {
@@ -140,7 +149,7 @@ fn build_ui<TickFn>(
         return;
     }
 
-    let sprite = load_sprite();
+    let sprite = load_sprite(sprite_bytes);
 
     let css = gtk4::CssProvider::new();
     css.load_from_string("window, .background { background-color: rgba(0,0,0,0); }");
@@ -591,9 +600,7 @@ fn start_tray_service() -> Arc<AtomicBool> {
     flag
 }
 
-fn load_sprite() -> Rc<Option<ImageSurface>> {
-    // Sprite-Sheet zur Compile-Zeit einbetten; keine Pfad-Abhängigkeit zur Laufzeit.
-    let bytes: &[u8] = include_bytes!("../../assets/sheep.png");
+fn load_sprite(bytes: &'static [u8]) -> Rc<Option<ImageSurface>> {
     let mut reader = std::io::Cursor::new(bytes);
     match ImageSurface::create_from_png(&mut reader) {
         Ok(s) => Rc::new(Some(s)),
