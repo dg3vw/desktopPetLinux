@@ -27,8 +27,6 @@ pub enum AnimId {
     Sleep2,
     Sleep2Wake,
     Eat,
-    /// An einer Blume schnuppern (id=27) – reine Idle-Animation.
-    Flower,
     /// Anlauf-Frames vor dem Sprinten (id=35).
     RunBegin,
     /// Sprinten (id=7): schnellere Frames + höheres dx.
@@ -67,12 +65,11 @@ pub const WALK: AnimDef = AnimDef {
     dx_per_tick: 2,
     repeat: 6,
     next: &[
-        (70, AnimId::Walk),
+        (72, AnimId::Walk),
         (7, AnimId::YawnSleep),
         (5, AnimId::Sleep2Yawn),
-        (5, AnimId::Eat),
-        (5, AnimId::Flower),
-        (8, AnimId::RunBegin),
+        (6, AnimId::Eat),
+        (10, AnimId::RunBegin),
     ],
     flip_on_end: false,
 };
@@ -172,17 +169,6 @@ pub const SLEEP2_WAKE: AnimDef = AnimDef {
     flip_on_end: false,
 };
 
-/// Flower (id=27): an einer Blume schnuppern. Gekürzt gegenüber dem Original,
-/// damit die Sequenz nicht so lange läuft.
-pub const FLOWER: AnimDef = AnimDef {
-    frames: &[174, 153, 153, 149, 149, 149, 150, 150, 151, 151, 6],
-    interval_ms: 300,
-    dx_per_tick: 0,
-    repeat: 1,
-    next: &[(100, AnimId::Walk)],
-    flip_on_end: false,
-};
-
 /// RunBegin (id=35): Anlauf-Ramp – Übergang von Walk zum Sprint.
 pub const RUN_BEGIN: AnimDef = AnimDef {
     frames: &[2, 3, 2, 5, 4, 5, 4, 5],
@@ -268,7 +254,6 @@ pub fn def(id: AnimId) -> &'static AnimDef {
         AnimId::Sleep2 => &SLEEP2,
         AnimId::Sleep2Wake => &SLEEP2_WAKE,
         AnimId::Eat => &EAT,
-        AnimId::Flower => &FLOWER,
         AnimId::RunBegin => &RUN_BEGIN,
         AnimId::Run => &RUN,
         AnimId::RunEnd => &RUN_END,
