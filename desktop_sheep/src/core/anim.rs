@@ -111,11 +111,12 @@ pub const WALK: AnimDef = AnimDef {
     dx_per_tick: 2,
     repeat: 6,
     next: &[
-        (72, AnimId::Walk),
+        (67, AnimId::Walk),
         (7, AnimId::YawnSleep),
         (5, AnimId::Sleep2Yawn),
         (6, AnimId::Eat),
         (10, AnimId::RunBegin),
+        (5, AnimId::Rotate1A),
     ],
     flip_on_end: false,
 };
