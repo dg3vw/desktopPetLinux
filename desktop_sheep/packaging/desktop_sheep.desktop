@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Desktop Sheep
+GenericName=Desktop Pet
+Comment=Ein Schaf läuft an der Bildschirmunterkante
+Exec=desktop_sheep
+Icon=desktop_sheep
+Terminal=false
+Categories=Utility;Amusement;
+StartupNotify=false
