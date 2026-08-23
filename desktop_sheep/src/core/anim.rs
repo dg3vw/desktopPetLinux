@@ -22,13 +22,27 @@ pub enum AnimId {
     YawnSleep,
     Sleep,
     WakeUp,
+    /// Alternative Schlafvariante (id=17/18): sitzen/dösen statt liegen.
+    Sleep2Yawn,
+    Sleep2,
+    Sleep2Wake,
     Eat,
+    /// An einer Blume schnuppern (id=27) – reine Idle-Animation.
+    Flower,
+    /// Anlauf-Frames vor dem Sprinten (id=35).
+    RunBegin,
+    /// Sprinten (id=7): schnellere Frames + höheres dx.
+    Run,
+    /// Abbrems-Frames nach dem Sprinten (id=36).
+    RunEnd,
     /// Zappeln während der Benutzer das Sprite hält (id=4).
     Drag,
     /// Frei fallen nach dem Loslassen (id=5).
     Fall,
     /// Kurzer "Aua"-Aufschlag am Boden (id=10) → geht in Walk über.
     FallHard,
+    /// Ausgedehnter, weicherer Landungs-Bounce (id=8) – Alternative zu FallHard.
+    Boing,
 }
 
 pub struct AnimDef {
@@ -52,7 +66,14 @@ pub const WALK: AnimDef = AnimDef {
     interval_ms: 200,
     dx_per_tick: 2,
     repeat: 6,
-    next: &[(85, AnimId::Walk), (10, AnimId::YawnSleep), (5, AnimId::Eat)],
+    next: &[
+        (70, AnimId::Walk),
+        (7, AnimId::YawnSleep),
+        (5, AnimId::Sleep2Yawn),
+        (5, AnimId::Eat),
+        (5, AnimId::Flower),
+        (8, AnimId::RunBegin),
+    ],
     flip_on_end: false,
 };
 
@@ -119,6 +140,91 @@ pub const EAT: AnimDef = AnimDef {
     flip_on_end: false,
 };
 
+/// Sleep2 – Sitz-Doze-Variante. Teil 1 (id=17 Vorlauf): setzen und Kopf senken.
+pub const SLEEP2_YAWN: AnimDef = AnimDef {
+    frames: &[3, 6, 7, 8],
+    interval_ms: 300,
+    dx_per_tick: 0,
+    repeat: 1,
+    next: &[(100, AnimId::Sleep2)],
+    flip_on_end: false,
+};
+
+/// Sleep2-Loop (id=17 Loop-Teil): kleines Nick-Muster in Sitzposition.
+/// Wie SLEEP dient `repeat` nur als Notaus; regulär endet der Zustand über
+/// Cursor-Aktivität (siehe Sheep::wake_from_sleep).
+pub const SLEEP2: AnimDef = AnimDef {
+    frames: &[8, 7, 8, 8],
+    interval_ms: 700,
+    dx_per_tick: 0,
+    repeat: 200,
+    next: &[(100, AnimId::Sleep2Wake)],
+    flip_on_end: false,
+};
+
+/// Sleep2b (id=18): Aufstehen aus dem Sitz, dann Walk.
+pub const SLEEP2_WAKE: AnimDef = AnimDef {
+    frames: &[8, 7, 6],
+    interval_ms: 300,
+    dx_per_tick: 0,
+    repeat: 1,
+    next: &[(100, AnimId::Walk)],
+    flip_on_end: false,
+};
+
+/// Flower (id=27): an einer Blume schnuppern. Gekürzt gegenüber dem Original,
+/// damit die Sequenz nicht so lange läuft.
+pub const FLOWER: AnimDef = AnimDef {
+    frames: &[174, 153, 153, 149, 149, 149, 150, 150, 151, 151, 6],
+    interval_ms: 300,
+    dx_per_tick: 0,
+    repeat: 1,
+    next: &[(100, AnimId::Walk)],
+    flip_on_end: false,
+};
+
+/// RunBegin (id=35): Anlauf-Ramp – Übergang von Walk zum Sprint.
+pub const RUN_BEGIN: AnimDef = AnimDef {
+    frames: &[2, 3, 2, 5, 4, 5, 4, 5],
+    interval_ms: 150,
+    dx_per_tick: 3,
+    repeat: 1,
+    next: &[(100, AnimId::Run)],
+    flip_on_end: false,
+};
+
+/// Run (id=7): Sprint, schneller Frame-Wechsel + größeres dx.
+pub const RUN: AnimDef = AnimDef {
+    frames: &[5, 4, 4],
+    interval_ms: 100,
+    dx_per_tick: 5,
+    repeat: 6,
+    next: &[(70, AnimId::Run), (30, AnimId::RunEnd)],
+    flip_on_end: false,
+};
+
+/// RunEnd (id=36): Abbrems-Ramp – Übergang zurück zu Walk.
+pub const RUN_END: AnimDef = AnimDef {
+    frames: &[5, 4, 5, 4, 5, 3, 2, 3, 2, 3],
+    interval_ms: 150,
+    dx_per_tick: 3,
+    repeat: 1,
+    next: &[(100, AnimId::Walk)],
+    flip_on_end: false,
+};
+
+/// Boing (id=8): elastische Landung – Alternative zu FallHard. Wird von der
+/// Fall-Physik gelegentlich statt FallHard gewählt, damit Landungen visuell
+/// abwechslungsreicher wirken.
+pub const BOING: AnimDef = AnimDef {
+    frames: &[62, 62, 63, 64, 65, 66, 67, 68, 69, 70, 6],
+    interval_ms: 100,
+    dx_per_tick: 0,
+    repeat: 1,
+    next: &[(100, AnimId::Walk)],
+    flip_on_end: false,
+};
+
 /// Drag (id=4): Zappeln, während der User das Schaf hält. Loop, keine
 /// Zustands­übergänge – wird nur beendet, indem der User loslässt.
 pub const DRAG: AnimDef = AnimDef {
@@ -158,10 +264,18 @@ pub fn def(id: AnimId) -> &'static AnimDef {
         AnimId::YawnSleep => &YAWN_SLEEP,
         AnimId::Sleep => &SLEEP,
         AnimId::WakeUp => &WAKE_UP,
+        AnimId::Sleep2Yawn => &SLEEP2_YAWN,
+        AnimId::Sleep2 => &SLEEP2,
+        AnimId::Sleep2Wake => &SLEEP2_WAKE,
         AnimId::Eat => &EAT,
+        AnimId::Flower => &FLOWER,
+        AnimId::RunBegin => &RUN_BEGIN,
+        AnimId::Run => &RUN,
+        AnimId::RunEnd => &RUN_END,
         AnimId::Drag => &DRAG,
         AnimId::Fall => &FALL,
         AnimId::FallHard => &FALL_HARD,
+        AnimId::Boing => &BOING,
     }
 }
 

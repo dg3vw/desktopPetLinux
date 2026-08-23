@@ -78,10 +78,11 @@ impl Sheep {
         def(self.anim).frames[self.frame_idx]
     }
 
-    /// True, solange das Schaf im Schlaf-Loop steckt.
+    /// True, solange das Schaf in irgendeinem Schlaf-Loop steckt
+    /// (klassisches Liegen oder Sitzen/Dösen).
     #[allow(dead_code)] // API für spätere UI/Debug-Anzeige
     pub fn is_sleeping(&self) -> bool {
-        self.anim == AnimId::Sleep
+        matches!(self.anim, AnimId::Sleep | AnimId::Sleep2)
     }
 
     /// Aktuelle Sprite-Bounding-Box in Overlay-lokalen Koordinaten.
@@ -105,8 +106,13 @@ impl Sheep {
     /// Bricht den Schlaf-Loop ab und wechselt sofort zur WakeUp-Animation.
     /// Kein Effekt, wenn das Schaf gerade nicht im Sleep-Zustand ist.
     pub fn wake_from_sleep(&mut self) {
-        if self.anim == AnimId::Sleep {
-            self.anim = AnimId::WakeUp;
+        let wake = match self.anim {
+            AnimId::Sleep => Some(AnimId::WakeUp),
+            AnimId::Sleep2 => Some(AnimId::Sleep2Wake),
+            _ => None,
+        };
+        if let Some(next) = wake {
+            self.anim = next;
             self.frame_idx = 0;
             self.frame_elapsed_ms = 0;
             self.repeats_done = 0;
@@ -287,10 +293,16 @@ impl Sheep {
                 // bouncen – Richtung umkehren, Energie verlieren
                 self.vy = -self.vy * BOUNCE_DAMP;
             } else {
-                // Endgültig gelandet – FallHard startet
+                // Endgültig gelandet – zufällig FallHard oder das etwas
+                // elastischere Boing wählen, damit Landungen abwechslungsreich
+                // aussehen.
                 self.vy = 0.0;
                 self.falling = false;
-                self.anim = AnimId::FallHard;
+                self.anim = if self.rng.range(2) == 0 {
+                    AnimId::FallHard
+                } else {
+                    AnimId::Boing
+                };
                 self.frame_idx = 0;
                 self.frame_elapsed_ms = 0;
                 self.repeats_done = 0;
