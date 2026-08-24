@@ -252,11 +252,20 @@ impl Sheep {
         self.y = (bottom as u32).saturating_sub(TILE_H) as f32;
     }
 
-    /// Startet die sanfte Umdreh-Sequenz (Rotate1A -> Rotate1B -> Walk).
-    /// Das eigentliche Facing-Flippen erledigt der Zustandsübergang am Ende
-    /// von Rotate1A (dank flip_on_end=true).
+    /// Reaktion beim Aufprall an der Segment-/Bildschirmkante.
+    ///
+    /// Wählt zwischen sanftem Umdrehen (Rotate1A → Rotate1B → Walk) und dem
+    /// dramatischen WallRam (Aufprall + Aua-Sprites, Facing-Flip am Ende).
+    /// Beim Sprint wird immer geramt, im normalen Walk nur gelegentlich –
+    /// sonst wirkt jede Kante zu heftig.
     fn begin_turn(&mut self) {
-        self.anim = AnimId::Rotate1A;
+        let ram = match self.anim {
+            AnimId::Run | AnimId::RunBegin => true,
+            AnimId::RunEnd => self.rng.range(2) == 0,
+            AnimId::Walk => self.rng.range(4) == 0,
+            _ => false,
+        };
+        self.anim = if ram { AnimId::WallRam } else { AnimId::Rotate1A };
         self.frame_idx = 0;
         self.frame_elapsed_ms = 0;
         self.repeats_done = 0;

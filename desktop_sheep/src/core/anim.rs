@@ -87,6 +87,10 @@ pub enum AnimId {
     FallHard,
     /// Ausgedehnter, weicherer Landungs-Bounce (id=8) – Alternative zu FallHard.
     Boing,
+    /// Frei komponiert: Schaf knallt gegen die Wand statt sanft umzudrehen.
+    /// Nutzt die "Aua"-Sprites aus Zeile 4 des Sheets (Frames 48/49). Ersetzt
+    /// bei Bedarf den Rotate1A/B-Ablauf an einer Segmentkante.
+    WallRam,
 }
 
 pub struct AnimDef {
@@ -258,6 +262,20 @@ pub const BOING: AnimDef = AnimDef {
     flip_on_end: false,
 };
 
+/// WallRam (frei komponiert, kein Pendant in animations.xml):
+/// Schaf knallt frontal gegen den Bildschirmrand. Sprites aus Zeile 4 des
+/// Sheets: 48 = "Aua"-Frame mit X-Augen, 49 = seitlich weggekippt. Endet mit
+/// neutralem Standframe (6) und Facing-Flip, sodass der Übergang in Walk
+/// bereits in die neue Richtung zeigt.
+pub const WALL_RAM: AnimDef = AnimDef {
+    frames: &[48, 48, 49, 49, 49, 48, 48, 6],
+    interval_ms: 180,
+    dx_per_tick: 0,
+    repeat: 1,
+    next: &[(100, AnimId::Walk)],
+    flip_on_end: true,
+};
+
 /// Drag (id=4): Zappeln, während der User das Schaf hält. Loop, keine
 /// Zustands­übergänge – wird nur beendet, indem der User loslässt.
 pub const DRAG: AnimDef = AnimDef {
@@ -308,6 +326,7 @@ pub fn def(id: AnimId) -> &'static AnimDef {
         AnimId::Fall => &FALL,
         AnimId::FallHard => &FALL_HARD,
         AnimId::Boing => &BOING,
+        AnimId::WallRam => &WALL_RAM,
     }
 }
 
