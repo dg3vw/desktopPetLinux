@@ -15,6 +15,11 @@ const EDGE_MARGIN: f32 = 10.0;
 /// Wahrscheinlichkeit (%) an einer äußeren Bildschirmkante aus dem Bild zu
 /// laufen und später von oben wieder hereinzufallen.
 const LEAVE_PERCENT: u32 = 20;
+/// Wahrscheinlichkeit (%) an einer äußeren Bildschirmkante die Wand
+/// hochzuklettern (zusätzlich zu LEAVE_PERCENT).
+const CLIMB_PERCENT: u32 = 30;
+/// Klettergeschwindigkeit an der Wand (Pixel pro 16-ms-Tick).
+const CLIMB_PX_PER_TICK: f32 = 1.5;
 /// Absprung beim jump_down: horizontal / nach oben (Pixel pro Sekunde).
 const JUMP_VX: f32 = 150.0;
 const JUMP_VY: f32 = 300.0;
@@ -201,9 +206,20 @@ impl Sheep {
             // Eintritt in eine Fall-Animation (Sprung/Abrutschen).
             return;
         }
-        if self.anim == AnimId::Surprised {
-            // Hängt verdutzt in der Luft – weder Bewegung noch Boden-Snap.
-            return;
+        match self.anim {
+            AnimId::Surprised => {
+                // Hängt verdutzt in der Luft – weder Bewegung noch Boden-Snap.
+                return;
+            }
+            AnimId::ClimbStart | AnimId::ClimbUp | AnimId::ClimbDown => {
+                self.tick_wall(dt_ms, world);
+                return;
+            }
+            AnimId::TopWalkStart | AnimId::TopWalk | AnimId::TopWalkEnd => {
+                self.tick_ceiling(dt_ms, segments, world);
+                return;
+            }
+            _ => {}
         }
 
         // 2) Halt auf dem Fenster prüfen. Das Fenster nimmt das Schaf nicht
@@ -410,12 +426,71 @@ impl Sheep {
         if self.try_cross(segments, world, dir) {
             return;
         }
-        if self.rng.range(100) < LEAVE_PERCENT {
+        let r = self.rng.range(100);
+        if r < LEAVE_PERCENT {
             self.leaving = true;
             return;
         }
         self.x = if dir == Facing::Left { min_x } else { max_x };
-        self.begin_turn();
+        if r < LEAVE_PERCENT + CLIMB_PERCENT {
+            self.set_anim(AnimId::ClimbStart);
+        } else {
+            self.begin_turn();
+        }
+    }
+
+    /// An der Bildschirmwand: hoch- bzw. runterklettern. Hochgeklettert wird
+    /// an der Wand in Blickrichtung, runter (nach dem Flip in TopWalkEnd) an
+    /// der Wand im Rücken – passend zur Ausrichtung der Sprites.
+    fn tick_wall(&mut self, dt_ms: u32, world: &World) {
+        let (aw, ah) = world.dims(self.monitor_idx);
+        let up = self.anim != AnimId::ClimbDown;
+        let wall_left = (self.facing == Facing::Left) == up;
+        self.x = if wall_left { 0.0 } else { (aw - TILE_W as i32).max(0) as f32 };
+        let floor = (ah - TILE_H as i32).max(0) as f32;
+        let dy = CLIMB_PX_PER_TICK * (dt_ms as f32 / 16.0);
+        match self.anim {
+            AnimId::ClimbStart => self.y = floor,
+            AnimId::ClimbUp => {
+                self.y -= dy;
+                if self.y <= 0.0 {
+                    self.y = 0.0;
+                    self.set_anim(AnimId::TopWalkStart);
+                }
+            }
+            _ => {
+                self.y += dy;
+                if self.y >= floor {
+                    self.y = floor;
+                    self.set_anim(AnimId::ClimbOver);
+                }
+            }
+        }
+    }
+
+    /// Kopfüber an der Bildschirmoberkante. Am Monitorübergang geht es wie
+    /// am Boden auf den Nachbarmonitor, an der Außenwand wieder runter.
+    fn tick_ceiling(&mut self, dt_ms: u32, segments: &[GroundSegment], world: &World) {
+        self.y = 0.0;
+        if self.anim != AnimId::TopWalk {
+            return; // Um die Ecke greifen – auf der Stelle.
+        }
+        let (aw, _) = world.dims(self.monitor_idx);
+        let dx = def(self.anim).dx_per_tick as f32 * self.forward() * (dt_ms as f32 / 16.0);
+        self.x += dx;
+        let max_x = (aw - TILE_W as i32).max(0) as f32;
+        let dir = if self.x <= 0.0 {
+            Facing::Left
+        } else if self.x >= max_x {
+            Facing::Right
+        } else {
+            return;
+        };
+        if self.try_cross(segments, world, dir) {
+            return;
+        }
+        self.x = self.x.clamp(0.0, max_x);
+        self.set_anim(AnimId::TopWalkEnd);
     }
 
     /// Reaktion beim Aufprall an der Segment-/Bildschirmkante.
@@ -720,6 +795,77 @@ mod tests {
         assert_eq!(s.anim, AnimId::Surprised);
         tick_until_landed(&mut s, &world, 16);
         assert_eq!(s.y + TILE_H as f32, 1080.0);
+    }
+
+    /// Schaf auf dem Boden an der linken Wand, kurz vorm Hochklettern.
+    fn at_left_wall_climbing(seed: u64) -> Sheep {
+        let none: Vec<Vec<Surface>> = vec![vec![]];
+        let world = World { area_dims: &DIMS, surfaces: &none };
+        let mut s = Sheep::new_at(0, 0.0, seed);
+        tick_until_landed(&mut s, &world, 16);
+        s.facing = Facing::Left;
+        s.set_anim(AnimId::ClimbStart);
+        s
+    }
+
+    #[test]
+    fn climbs_wall_crosses_ceiling_and_comes_down() {
+        let none: Vec<Vec<Surface>> = vec![vec![]];
+        let world = World { area_dims: &DIMS, surfaces: &none };
+        // Seeds durchprobieren, bis eins die ganze Decke schafft (ohne
+        // vorher loszulassen) – deterministisch, da fester RNG.
+        for seed in 1..200 {
+            let mut s = at_left_wall_climbing(seed);
+            let mut seen_top = false;
+            let mut dropped = false;
+            for _ in 0..(120_000 / 16) {
+                s.tick(16, &SEGS, &world);
+                match s.anim {
+                    AnimId::ClimbUp => assert_eq!(s.x, 0.0),
+                    AnimId::TopWalk => {
+                        seen_top = true;
+                        assert_eq!(s.y, 0.0);
+                        assert_eq!(s.facing, Facing::Right);
+                    }
+                    AnimId::ClimbDown => assert_eq!(s.x, (1920 - TILE_W) as f32),
+                    AnimId::FallPanic => dropped = true,
+                    _ => {}
+                }
+                if dropped || s.anim == AnimId::ClimbOver {
+                    break;
+                }
+            }
+            assert!(seen_top);
+            if !dropped {
+                assert_eq!(s.anim, AnimId::ClimbOver);
+                assert_eq!(s.y + TILE_H as f32, 1080.0);
+                return;
+            }
+        }
+        panic!("kein Schaf hat die Decke komplett überquert");
+    }
+
+    #[test]
+    fn drops_from_ceiling_onto_window() {
+        // Fenster unterhalb fast der ganzen Decke: wer loslässt, landet drauf.
+        let surfaces = vec![vec![surface(1, 50, 1870, 600)]];
+        let world = World { area_dims: &DIMS, surfaces: &surfaces };
+        for seed in 1..200 {
+            let mut s = at_left_wall_climbing(seed);
+            for _ in 0..(120_000 / 16) {
+                s.tick(16, &SEGS, &world);
+                if s.anim == AnimId::FallPanic {
+                    tick_until_landed(&mut s, &world, 16);
+                    assert_eq!(s.support_window(), Some(1));
+                    assert_eq!(s.y + TILE_H as f32, 600.0);
+                    return;
+                }
+                if s.anim == AnimId::ClimbOver {
+                    break;
+                }
+            }
+        }
+        panic!("kein Schaf hat an der Decke losgelassen");
     }
 
     #[test]

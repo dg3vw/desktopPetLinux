@@ -15,6 +15,10 @@ unterstützt.
   (oder schließt, minimiert, verdeckt es), hängt es kurz verdutzt in der
   Luft und fällt dann auf das nächste Fenster oder den Boden; an der
   Fensterkante springt es herunter oder rutscht ab
+- Klettert an der äußeren Bildschirmwand hoch, läuft kopfüber an der
+  Bildschirmoberkante entlang und lässt sich gelegentlich fallen – so
+  landet es von selbst wieder auf Fenstern; sonst klettert es an der
+  gegenüberliegenden Wand wieder herunter
 - Fällt beim Start von oben ins Bild und landet dabei ggf. auf einem Fenster;
   läuft gelegentlich seitlich aus dem Bild und kommt von oben wieder
 - Grasen, Gähnen/Schlafen, Sitzen/Dösen – Mausbewegung weckt schlafende Schafe

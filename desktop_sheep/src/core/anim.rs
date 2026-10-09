@@ -113,6 +113,20 @@ pub enum AnimId {
     /// Panik-Fall nach Surprised: Frontansicht mit hochgerissenen Beinen
     /// (Frames aus "fall fast", id=6).
     FallPanic,
+    /// vertical_walk_up (id=37), Anlauf-Teil: an der Wand aufrichten.
+    ClimbStart,
+    /// vertical_walk_up (id=37), Loop-Teil: die Bildschirmwand hochklettern.
+    ClimbUp,
+    /// top_walk (id=38): oben ankommen und kopfüber an die Decke drehen.
+    TopWalkStart,
+    /// top_walk2 (id=39): kopfüber an der Bildschirmoberkante laufen.
+    TopWalk,
+    /// top_walk3 (id=40): an der gegenüberliegenden Wand umgreifen.
+    TopWalkEnd,
+    /// vertical_walk_down (id=41): die Wand wieder herunterklettern.
+    ClimbDown,
+    /// vertical_walk_over (id=42): unten wieder auf die Füße kommen.
+    ClimbOver,
 }
 
 pub struct AnimDef {
@@ -437,6 +451,82 @@ pub const FALL_PANIC: AnimDef = AnimDef {
     flip_on_end: false,
 };
 
+/// ClimbStart (id=37, Frames vor `repeatfrom`): an der Wand aufrichten.
+/// Ungespiegelt hängen die Füße an der linken Wand.
+pub const CLIMB_START: AnimDef = AnimDef {
+    frames: &[31, 30],
+    interval_ms: 150,
+    dx_per_tick: 0,
+    repeat: 1,
+    next: &[(100, AnimId::ClimbUp)],
+    flip_on_end: false,
+};
+
+/// ClimbUp (id=37, Loop-Teil): hochklettern. Endet nicht über `next`,
+/// sondern sobald die Oberkante erreicht ist (siehe Sheep).
+pub const CLIMB_UP: AnimDef = AnimDef {
+    frames: &[15, 16],
+    interval_ms: 150,
+    dx_per_tick: 0,
+    repeat: 1,
+    next: &[(100, AnimId::ClimbUp)],
+    flip_on_end: false,
+};
+
+/// TopWalkStart (id=38): um die obere Ecke herum, danach in die
+/// Gegenrichtung (weg von der Wand).
+pub const TOP_WALK_START: AnimDef = AnimDef {
+    frames: &[16, 17, 28],
+    interval_ms: 200,
+    dx_per_tick: 0,
+    repeat: 1,
+    next: &[(100, AnimId::TopWalk)],
+    flip_on_end: true,
+};
+
+/// TopWalk (id=39): kopfüber laufen. Im Original endet das nur an der
+/// Wand; hier lässt das Schaf gelegentlich los und fällt – so landet es
+/// ohne Hilfe auf Fenstern.
+pub const TOP_WALK: AnimDef = AnimDef {
+    frames: &[98, 97],
+    interval_ms: 150,
+    dx_per_tick: 2,
+    repeat: 6,
+    next: &[(80, AnimId::TopWalk), (20, AnimId::FallPanic)],
+    flip_on_end: false,
+};
+
+/// TopWalkEnd (id=40): an der Gegenwand umgreifen, Blickrichtung kippt.
+pub const TOP_WALK_END: AnimDef = AnimDef {
+    frames: &[97, 97],
+    interval_ms: 400,
+    dx_per_tick: 0,
+    repeat: 1,
+    next: &[(100, AnimId::ClimbDown)],
+    flip_on_end: true,
+};
+
+/// ClimbDown (id=41): kopfabwärts klettern. Ungespiegelt hängen die Füße
+/// an der rechten Wand. Endet am Boden (siehe Sheep).
+pub const CLIMB_DOWN: AnimDef = AnimDef {
+    frames: &[19, 20],
+    interval_ms: 150,
+    dx_per_tick: 0,
+    repeat: 1,
+    next: &[(100, AnimId::ClimbDown)],
+    flip_on_end: false,
+};
+
+/// ClimbOver (id=42): unten ankommen, aufrichten, weiterlaufen.
+pub const CLIMB_OVER: AnimDef = AnimDef {
+    frames: &[24, 6, 6, 6],
+    interval_ms: 150,
+    dx_per_tick: 0,
+    repeat: 1,
+    next: &[(100, AnimId::Walk)],
+    flip_on_end: false,
+};
+
 pub fn def(id: AnimId) -> &'static AnimDef {
     match id {
         AnimId::Walk => &WALK,
@@ -467,6 +557,13 @@ pub fn def(id: AnimId) -> &'static AnimDef {
         AnimId::FallWinD => &FALL_WIN_D,
         AnimId::Surprised => &SURPRISED,
         AnimId::FallPanic => &FALL_PANIC,
+        AnimId::ClimbStart => &CLIMB_START,
+        AnimId::ClimbUp => &CLIMB_UP,
+        AnimId::TopWalkStart => &TOP_WALK_START,
+        AnimId::TopWalk => &TOP_WALK,
+        AnimId::TopWalkEnd => &TOP_WALK_END,
+        AnimId::ClimbDown => &CLIMB_DOWN,
+        AnimId::ClimbOver => &CLIMB_OVER,
     }
 }
 
