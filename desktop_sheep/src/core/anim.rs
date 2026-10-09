@@ -107,6 +107,12 @@ pub enum AnimId {
     FallWinC,
     /// fall_wind (id=54): benommen aufrappeln.
     FallWinD,
+    /// Frei komponiert: Fenster wurde unter dem Schaf weggezogen – es hängt
+    /// kurz verdutzt in der Luft (Glubschauge), schaut runter, dann Fall.
+    Surprised,
+    /// Panik-Fall nach Surprised: Frontansicht mit hochgerissenen Beinen
+    /// (Frames aus "fall fast", id=6).
+    FallPanic,
 }
 
 pub struct AnimDef {
@@ -410,6 +416,27 @@ pub const FALL_WIN_D: AnimDef = AnimDef {
     flip_on_end: false,
 };
 
+/// Surprised (frei komponiert): Glubschauge (50 → 51), Blick nach unten (78),
+/// danach FallPanic. Insgesamt gut eine halbe Sekunde „in der Luft stehen“.
+pub const SURPRISED: AnimDef = AnimDef {
+    frames: &[50, 51, 51, 51, 51, 78, 78],
+    interval_ms: 90,
+    dx_per_tick: 0,
+    repeat: 1,
+    next: &[(100, AnimId::FallPanic)],
+    flip_on_end: false,
+};
+
+/// FallPanic: Flug-Frames; Ende bestimmt die Landung, nicht `next`.
+pub const FALL_PANIC: AnimDef = AnimDef {
+    frames: &[46, 46, 47, 47],
+    interval_ms: 80,
+    dx_per_tick: 0,
+    repeat: 1,
+    next: &[(100, AnimId::FallPanic)],
+    flip_on_end: false,
+};
+
 pub fn def(id: AnimId) -> &'static AnimDef {
     match id {
         AnimId::Walk => &WALK,
@@ -438,6 +465,8 @@ pub fn def(id: AnimId) -> &'static AnimDef {
         AnimId::FallWinB => &FALL_WIN_B,
         AnimId::FallWinC => &FALL_WIN_C,
         AnimId::FallWinD => &FALL_WIN_D,
+        AnimId::Surprised => &SURPRISED,
+        AnimId::FallPanic => &FALL_PANIC,
     }
 }
 

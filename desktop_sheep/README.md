@@ -11,9 +11,10 @@ unterstützt.
 ## Features
 
 - Laufen, Sprinten, Umdrehen, gelegentlich gegen die Wand rennen
-- Laufen auf Fensteroberkanten: das Schaf wandert mit, wenn das Fenster
-  verschoben wird, fällt herunter, wenn es geschlossen, minimiert oder
-  verdeckt wird, und springt an der Kante herunter oder rutscht ab
+- Laufen auf Fensteroberkanten: zieht man das Fenster unter dem Schaf weg
+  (oder schließt, minimiert, verdeckt es), hängt es kurz verdutzt in der
+  Luft und fällt dann auf das nächste Fenster oder den Boden; an der
+  Fensterkante springt es herunter oder rutscht ab
 - Fällt beim Start von oben ins Bild und landet dabei ggf. auf einem Fenster;
   läuft gelegentlich seitlich aus dem Bild und kommt von oben wieder
 - Grasen, Gähnen/Schlafen, Sitzen/Dösen – Mausbewegung weckt schlafende Schafe

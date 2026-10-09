@@ -9,14 +9,6 @@ pub enum Facing {
     Right,
 }
 
-/// Fenster, auf dessen Oberkante das Schaf gerade steht.
-#[derive(Debug, Clone, Copy)]
-struct Support {
-    window: WindowId,
-    /// Zuletzt gesehene linke Fensterkante – Differenz = Fensterverschiebung.
-    win_x: i32,
-}
-
 /// Wie weit vor dem Ende einer Fensterkante (Sprite-Mitte) das Schaf
 /// stehen bleibt und überlegt, was es tut.
 const EDGE_MARGIN: f32 = 10.0;
@@ -26,6 +18,9 @@ const LEAVE_PERCENT: u32 = 20;
 /// Absprung beim jump_down: horizontal / nach oben (Pixel pro Sekunde).
 const JUMP_VX: f32 = 150.0;
 const JUMP_VY: f32 = 300.0;
+/// Sackt das Trägerfenster um mehr als so viele Pixel ab, verliert das
+/// Schaf den Halt (kleinere Sprünge werden einfach nachgeführt).
+const DETACH_PX: f32 = 3.0;
 
 pub struct Sheep {
     /// Position in Overlay-lokalen Koordinaten des aktuellen Monitors
@@ -45,7 +40,7 @@ pub struct Sheep {
     vx: f32,
     vy: f32,
     /// Fenster unter den Füßen; `None` = Boden (Bildschirmunterkante).
-    support: Option<Support>,
+    support: Option<WindowId>,
     /// Sprite-Versatz unter die Kante, solange das Schaf an ihr hängt.
     hang_offset: f32,
     /// Landeanimation des laufenden Falls; `None` = zufällig FallHard/Boing
@@ -103,7 +98,7 @@ impl Sheep {
     /// Fenster, auf dem das Schaf gerade steht (`None` = Boden oder in der Luft).
     #[allow(dead_code)] // für Tests und Debug-Ausgabe
     pub fn support_window(&self) -> Option<WindowId> {
-        self.support.map(|s| s.window)
+        self.support
     }
 
     /// Aktuelle Sprite-Bounding-Box in Overlay-lokalen Koordinaten.
@@ -155,7 +150,6 @@ impl Sheep {
     pub fn end_drag(&mut self) {
         self.dragged = false;
         self.set_anim(AnimId::Fall);
-        self.start_fall(None);
     }
 
     /// Setzt die Position (samt Ziel-Monitor). Nur während Drag sinnvoll.
@@ -207,19 +201,22 @@ impl Sheep {
             // Eintritt in eine Fall-Animation (Sprung/Abrutschen).
             return;
         }
+        if self.anim == AnimId::Surprised {
+            // Hängt verdutzt in der Luft – weder Bewegung noch Boden-Snap.
+            return;
+        }
 
-        // 2) Halt auf dem Fenster prüfen: mitwandern oder abstürzen.
+        // 2) Halt auf dem Fenster prüfen. Das Fenster nimmt das Schaf nicht
+        //    mit: Zieht man es weg oder lässt es absacken, steht das Schaf
+        //    plötzlich in der Luft, schaut verdutzt und fällt dann. Nur wenn
+        //    das Fenster nach oben geschoben wird, wird es mit angehoben.
         let mut seg = None;
-        if let Some(sup) = self.support {
-            match self.find_support(sup, world) {
-                Some(s) => {
-                    self.x += (s.win_x - sup.win_x) as f32;
-                    self.support = Some(Support { window: sup.window, win_x: s.win_x });
-                    seg = Some(s);
-                }
-                None => {
-                    self.set_anim(AnimId::Fall);
-                    self.start_fall(None);
+        if let Some(window) = self.support {
+            let feet = self.y + TILE_H as f32 - self.hang_offset;
+            match self.find_support(window, world) {
+                Some(s) if s.y as f32 <= feet + DETACH_PX => seg = Some(s),
+                _ => {
+                    self.lose_support();
                     return;
                 }
             }
@@ -288,6 +285,7 @@ impl Sheep {
                 self.hang_offset = TILE_H as f32 * 0.45;
             }
             AnimId::FallWinC => self.start_fall(Some(AnimId::FallWinD)),
+            AnimId::Fall | AnimId::FallPanic => self.start_fall(None),
             _ => {}
         }
     }
@@ -330,23 +328,32 @@ impl Sheep {
         }
     }
 
-    /// Sucht die Kante des Trägerfensters unter der Sprite-Mitte –
-    /// berücksichtigt dabei, dass das Fenster seit dem letzten Tick
-    /// verschoben worden sein kann. Hängt das Schaf gerade an der Kante,
-    /// reicht es, wenn die Kante in Reichweite ist.
-    fn find_support(&self, sup: Support, world: &World) -> Option<Surface> {
-        let surfaces = world.surfaces(self.monitor_idx);
-        let win_x = surfaces.iter().find(|s| s.window == sup.window)?.win_x;
-        let cx = self.x + (win_x - sup.win_x) as f32 + TILE_W as f32 / 2.0;
+    /// Sucht die Kante des Trägerfensters unter der Sprite-Mitte. Hängt das
+    /// Schaf gerade an der Kante, reicht es, wenn die Kante in Reichweite ist.
+    fn find_support(&self, window: WindowId, world: &World) -> Option<Surface> {
+        let cx = self.x + TILE_W as f32 / 2.0;
         let tol = if self.hang_offset > 0.0 { TILE_W as f32 } else { 0.0 };
-        surfaces
+        world
+            .surfaces(self.monitor_idx)
             .iter()
             .find(|s| {
-                s.window == sup.window
+                s.window == window
                     && cx >= s.x_start as f32 - tol
                     && cx <= s.x_end as f32 + tol
             })
             .copied()
+    }
+
+    /// Fenster ist unter dem Schaf weg (weggezogen, abgesackt, geschlossen,
+    /// minimiert, verdeckt). Wer an der Kante hängt, lässt sofort los; sonst
+    /// erst der verdutzte Blick, dann der Fall.
+    fn lose_support(&mut self) {
+        self.support = None;
+        if self.hang_offset > 0.0 {
+            self.set_anim(AnimId::FallWinC);
+        } else {
+            self.set_anim(AnimId::Surprised);
+        }
     }
 
     /// Am Ende einer Fensterkante: stehen bleiben und reagieren.
@@ -444,7 +451,6 @@ impl Sheep {
         self.y = -(TILE_H as f32);
         self.leaving = false;
         self.set_anim(AnimId::Fall);
-        self.start_fall(None);
     }
 
     /// Fall-Physik einschalten. Die laufende Animation bleibt (Flug-Frame).
@@ -528,7 +534,7 @@ impl Sheep {
         self.falling = false;
         self.vx = 0.0;
         self.vy = 0.0;
-        self.support = seg.map(|s| Support { window: s.window, win_x: s.win_x });
+        self.support = seg.map(|s| s.window);
         let next = match self.land_anim.take() {
             Some(a) => a,
             None if self.rng.range(2) == 0 => AnimId::FallHard,
@@ -595,7 +601,11 @@ mod tests {
     }
 
     /// Tickt, bis das Schaf nicht mehr fällt (max. 10 s Simulationszeit).
+    /// Ein laufendes Surprised wird erst abgewartet.
     fn tick_until_landed(s: &mut Sheep, world: &World, dt: u32) {
+        while s.anim == AnimId::Surprised {
+            s.tick(dt, &SEGS, world);
+        }
         for _ in 0..(10_000 / dt) {
             s.tick(dt, &SEGS, world);
             if !s.falling {
@@ -635,27 +645,81 @@ mod tests {
         assert_eq!(s.y + TILE_H as f32, 1080.0);
     }
 
-    #[test]
-    fn follows_moved_window_and_falls_when_it_vanishes() {
+    /// Landet das Schaf auf Fenster 1 bei x=400 und liefert es zurück.
+    fn landed_on_window() -> Sheep {
         let surfaces = vec![vec![surface(1, 100, 900, 300)]];
         let world = World { area_dims: &DIMS, surfaces: &surfaces };
         let mut s = Sheep::new_at(0, 400.0, 3);
         tick_until_landed(&mut s, &world, 16);
+        assert_eq!(s.support_window(), Some(1));
+        s
+    }
+
+    #[test]
+    fn window_slides_underneath_without_carrying_sheep() {
+        let mut s = landed_on_window();
         let x0 = s.x;
-
-        // Fenster um (+50, +20) verschoben. Landeanimationen haben dx=0,
-        // die Verschiebung kommt also allein vom Mitwandern.
-        let moved = vec![vec![Surface { window: 1, x_start: 150, x_end: 950, y: 320, win_x: 150, win_right: 950 }]];
+        // Fenster um 50 px nach rechts, Schaf steht noch drauf. Landeanimationen
+        // haben dx=0 – das Schaf bleibt also exakt stehen.
+        let moved = vec![vec![surface(1, 150, 950, 300)]];
         s.tick(16, &SEGS, &World { area_dims: &DIMS, surfaces: &moved });
-        assert_eq!(s.x, x0 + 50.0);
-        assert_eq!(s.y + TILE_H as f32, 320.0);
-        assert!(!s.falling);
+        assert_eq!(s.x, x0);
+        assert_eq!(s.support_window(), Some(1));
+    }
 
-        // Fenster weg (geschlossen/minimiert) → Absturz.
-        let empty: Vec<Vec<Surface>> = vec![vec![]];
-        s.tick(16, &SEGS, &World { area_dims: &DIMS, surfaces: &empty });
-        assert!(s.falling);
+    #[test]
+    fn window_pushed_up_lifts_sheep() {
+        let mut s = landed_on_window();
+        let up = vec![vec![surface(1, 100, 900, 250)]];
+        s.tick(16, &SEGS, &World { area_dims: &DIMS, surfaces: &up });
+        assert_eq!(s.y + TILE_H as f32, 250.0);
+        assert_eq!(s.support_window(), Some(1));
+    }
+
+    #[test]
+    fn window_pulled_away_surprise_then_fall_to_floor() {
+        let mut s = landed_on_window();
+        let y0 = s.y;
+        // Fenster komplett nach rechts weggezogen.
+        let away = vec![vec![surface(1, 700, 1500, 300)]];
+        let world = World { area_dims: &DIMS, surfaces: &away };
+        s.tick(16, &SEGS, &world);
+        assert_eq!(s.anim, AnimId::Surprised);
         assert_eq!(s.support_window(), None);
+        assert!(!s.falling);
+        // Hängt erst eine Weile verdutzt in der Luft …
+        for _ in 0..10 {
+            s.tick(16, &SEGS, &world);
+        }
+        assert_eq!(s.y, y0);
+        assert!(!s.falling);
+        // … und fällt dann auf den Boden.
+        tick_until_landed(&mut s, &world, 16);
+        assert_eq!(s.support_window(), None);
+        assert_eq!(s.y + TILE_H as f32, 1080.0);
+    }
+
+    #[test]
+    fn window_dropped_down_sheep_falls_after_it() {
+        let mut s = landed_on_window();
+        let down = vec![vec![surface(1, 100, 900, 500)]];
+        let world = World { area_dims: &DIMS, surfaces: &down };
+        s.tick(16, &SEGS, &world);
+        assert_eq!(s.anim, AnimId::Surprised);
+        tick_until_landed(&mut s, &world, 16);
+        assert_eq!(s.support_window(), Some(1));
+        assert_eq!(s.y + TILE_H as f32, 500.0);
+    }
+
+    #[test]
+    fn window_vanishes_sheep_falls() {
+        let mut s = landed_on_window();
+        let empty: Vec<Vec<Surface>> = vec![vec![]];
+        let world = World { area_dims: &DIMS, surfaces: &empty };
+        s.tick(16, &SEGS, &world);
+        assert_eq!(s.anim, AnimId::Surprised);
+        tick_until_landed(&mut s, &world, 16);
+        assert_eq!(s.y + TILE_H as f32, 1080.0);
     }
 
     #[test]

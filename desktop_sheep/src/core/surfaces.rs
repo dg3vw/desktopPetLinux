@@ -28,8 +28,7 @@ pub struct Surface {
     pub x_end: i32,
     /// Höhe der Kante – hier stehen die Füße des Schafs.
     pub y: i32,
-    /// Linke Fensterkante (ungeclippt). Ändert sich nur, wenn das Fenster
-    /// verschoben wird – daran erkennt das Schaf horizontale Mitnahme.
+    /// Linke Fensterkante (ungeclippt).
     pub win_x: i32,
     /// Rechte Fensterkante (ungeclippt). Endet `x_start`/`x_end` nicht an
     /// `win_x`/`win_right`, ist dort eine Wand (Verdeckung, Monitorrand)
