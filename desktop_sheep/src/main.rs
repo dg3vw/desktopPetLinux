@@ -10,7 +10,7 @@ use crate::platform::{CurrentPlatform, Platform};
 
 #[derive(Debug)]
 enum Command {
-    Run { n_sheep: usize, color: SpriteColor },
+    Run { n_sheep: usize, color: SpriteColor, windows: bool },
     InstallAutostart,
     RemoveAutostart,
     Help,
@@ -22,24 +22,29 @@ fn print_help() {
         "desktop_sheep – Overlay-Schafe an der Bildschirmunterkante.\n\
          \n\
          Nutzung:\n  \
-           {bin} [--sheep N] [--color FARBE]  starten (Standard: 1 Schaf, Originalfarbe)\n  \
-           {bin} --install-autostart          .desktop-Datei in ~/.config/autostart/ anlegen\n  \
-           {bin} --remove-autostart           .desktop-Datei entfernen\n  \
-           {bin} --help                       diese Hilfe\n\
+           {bin} [OPTIONEN]               starten\n  \
+           {bin} --install-autostart      .desktop-Datei in ~/.config/autostart/ anlegen\n  \
+           {bin} --remove-autostart       .desktop-Datei entfernen\n  \
+           {bin} --help                   diese Hilfe\n\
          \n\
-         FARBE: default | blue | green | orange | pink | purple | red | yellow\n"
+         Optionen:\n  \
+           --sheep N        Anzahl Schafe (Standard: 1)\n  \
+           --color FARBE    default | blue | green | orange | pink | purple | red | yellow\n  \
+           --no-windows     nur am Boden laufen, nicht auf Fensteroberkanten\n"
     );
 }
 
 fn parse_args() -> Command {
     let mut n_sheep: usize = 1;
     let mut color: SpriteColor = SpriteColor::Default;
+    let mut windows = true;
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
             "--help" | "-h" => return Command::Help,
             "--install-autostart" => return Command::InstallAutostart,
             "--remove-autostart" => return Command::RemoveAutostart,
+            "--no-windows" => windows = false,
             "--sheep" => {
                 if let Some(v) = it.next() {
                     n_sheep = v.parse().unwrap_or(1).max(1);
@@ -64,7 +69,7 @@ fn parse_args() -> Command {
             }
         }
     }
-    Command::Run { n_sheep, color }
+    Command::Run { n_sheep, color, windows }
 }
 
 fn autostart_path() -> Option<std::path::PathBuf> {
@@ -134,12 +139,12 @@ fn main() {
             }
             return;
         }
-        Command::Run { n_sheep, color } => run_overlay(n_sheep, color),
+        Command::Run { n_sheep, color, windows } => run_overlay(n_sheep, color, windows),
     }
 }
 
-fn run_overlay(n_sheep: usize, color: SpriteColor) {
-    let platform = CurrentPlatform::with_color(color);
+fn run_overlay(n_sheep: usize, color: SpriteColor, windows: bool) {
+    let platform = CurrentPlatform::new(color, windows);
     let monitors = platform.monitor_geometry();
     if monitors.is_empty() {
         eprintln!("Keine Monitore gefunden – bricht ab.");
@@ -159,13 +164,13 @@ fn run_overlay(n_sheep: usize, color: SpriteColor) {
         let x = 40.0 + ((i / monitors.len()) as f32) * 150.0;
         let seed = base_seed
             .wrapping_add((i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
-        sheeps.push(Sheep::new_at(&segments, monitor_idx, x, seed));
+        sheeps.push(Sheep::new_at(monitor_idx, x, seed));
     }
 
     let seg_for_tick = segments.clone();
-    if let Err(e) = platform.run(sheeps, 16, move |all, dt, dims| {
+    if let Err(e) = platform.run(sheeps, 16, move |all, dt, world| {
         for s in all.iter_mut() {
-            s.tick(dt, &seg_for_tick, dims);
+            s.tick(dt, &seg_for_tick, world);
         }
     }) {
         eprintln!("Backend-Fehler: {e}");

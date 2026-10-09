@@ -1,13 +1,31 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use super::anim::{def, pick_next, AnimId, Rng, TILE_H, TILE_W};
 use super::geometry::GroundSegment;
+use super::surfaces::{Surface, WindowId};
+use super::world::World;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Facing {
     Left,
     Right,
 }
+
+/// Fenster, auf dessen Oberkante das Schaf gerade steht.
+#[derive(Debug, Clone, Copy)]
+struct Support {
+    window: WindowId,
+    /// Zuletzt gesehene linke Fensterkante – Differenz = Fensterverschiebung.
+    win_x: i32,
+}
+
+/// Wie weit vor dem Ende einer Fensterkante (Sprite-Mitte) das Schaf
+/// stehen bleibt und überlegt, was es tut.
+const EDGE_MARGIN: f32 = 10.0;
+/// Wahrscheinlichkeit (%) an einer äußeren Bildschirmkante aus dem Bild zu
+/// laufen und später von oben wieder hereinzufallen.
+const LEAVE_PERCENT: u32 = 20;
+/// Absprung beim jump_down: horizontal / nach oben (Pixel pro Sekunde).
+const JUMP_VX: f32 = 150.0;
+const JUMP_VY: f32 = 300.0;
 
 pub struct Sheep {
     /// Position in Overlay-lokalen Koordinaten des aktuellen Monitors
@@ -21,10 +39,20 @@ pub struct Sheep {
     /// True während der Benutzer das Sprite zieht: zappelt, aber bewegt
     /// sich nicht von selbst und wechselt den Zustand nicht.
     pub dragged: bool,
-    /// True während des freien Falls nach dem Loslassen (bis inkl. bounce).
+    /// True während des freien Falls (Loslassen, Sprung, Absturz vom Fenster).
     falling: bool,
-    /// Vertikale Geschwindigkeit für die Fall-Physik (Pixel pro Sekunde).
+    /// Geschwindigkeit für die Fall-Physik (Pixel pro Sekunde).
+    vx: f32,
     vy: f32,
+    /// Fenster unter den Füßen; `None` = Boden (Bildschirmunterkante).
+    support: Option<Support>,
+    /// Sprite-Versatz unter die Kante, solange das Schaf an ihr hängt.
+    hang_offset: f32,
+    /// Landeanimation des laufenden Falls; `None` = zufällig FallHard/Boing
+    /// mit vorherigem Nachfedern.
+    land_anim: Option<AnimId>,
+    /// Läuft gerade aus dem Bild, um danach von oben neu hereinzufallen.
+    leaving: bool,
     anim: AnimId,
     frame_idx: usize,
     frame_elapsed_ms: u32,
@@ -33,44 +61,31 @@ pub struct Sheep {
 }
 
 impl Sheep {
-    /// Erzeugt ein Schaf an einer bestimmten Startposition mit explizitem
-    /// RNG-Seed – so lassen sich mehrere Instanzen zuverlässig
-    /// unterschiedlich seeden.
-    pub fn new_at(
-        segments: &[GroundSegment],
-        monitor_idx: usize,
-        x: f32,
-        seed: u64,
-    ) -> Self {
-        let seg = segments
-            .get(monitor_idx)
-            .copied()
-            .unwrap_or(segments[0]);
-        Self {
+    /// Erzeugt ein Schaf, das über Position `x` auf Monitor `monitor_idx`
+    /// von oben ins Bild fällt. Expliziter RNG-Seed, damit sich mehrere
+    /// Instanzen zuverlässig unterscheiden.
+    pub fn new_at(monitor_idx: usize, x: f32, seed: u64) -> Self {
+        let mut s = Self {
             x,
-            y: (seg.y as u32).saturating_sub(TILE_H) as f32,
+            y: 0.0,
             facing: Facing::Right,
             monitor_idx,
             dragged: false,
             falling: false,
+            vx: 0.0,
             vy: 0.0,
+            support: None,
+            hang_offset: 0.0,
+            land_anim: None,
+            leaving: false,
             anim: AnimId::Walk,
             frame_idx: 0,
             frame_elapsed_ms: 0,
             repeats_done: 0,
             rng: Rng::from_seed(seed),
-        }
-    }
-
-    /// Bequemer Default: erste Position auf dem ersten Monitor, Seed aus
-    /// Systemzeit. Für Einzel-Schaf-Läufe.
-    #[allow(dead_code)]
-    pub fn new(segments: &[GroundSegment]) -> Self {
-        let seed = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0xDEAD_BEEF_C0FFEE);
-        Self::new_at(segments, 0, 20.0, seed)
+        };
+        s.drop_in(monitor_idx, x);
+        s
     }
 
     /// Aktuell zu zeichnender Frame-Index im Sprite-Sheet.
@@ -83,6 +98,12 @@ impl Sheep {
     #[allow(dead_code)] // API für spätere UI/Debug-Anzeige
     pub fn is_sleeping(&self) -> bool {
         matches!(self.anim, AnimId::Sleep | AnimId::Sleep2)
+    }
+
+    /// Fenster, auf dem das Schaf gerade steht (`None` = Boden oder in der Luft).
+    #[allow(dead_code)] // für Tests und Debug-Ausgabe
+    pub fn support_window(&self) -> Option<WindowId> {
+        self.support.map(|s| s.window)
     }
 
     /// Aktuelle Sprite-Bounding-Box in Overlay-lokalen Koordinaten.
@@ -112,10 +133,7 @@ impl Sheep {
             _ => None,
         };
         if let Some(next) = wake {
-            self.anim = next;
-            self.frame_idx = 0;
-            self.frame_elapsed_ms = 0;
-            self.repeats_done = 0;
+            self.set_anim(next);
         }
     }
 
@@ -124,22 +142,20 @@ impl Sheep {
     pub fn start_drag(&mut self) {
         self.dragged = true;
         self.falling = false;
+        self.vx = 0.0;
         self.vy = 0.0;
-        self.anim = AnimId::Drag;
-        self.frame_idx = 0;
-        self.frame_elapsed_ms = 0;
-        self.repeats_done = 0;
+        self.support = None;
+        self.hang_offset = 0.0;
+        self.leaving = false;
+        self.set_anim(AnimId::Drag);
     }
 
-    /// User hat losgelassen: fällt mit Gravitation, bounct einmal, landet.
+    /// User hat losgelassen: fällt mit Gravitation, bounct, landet – auf dem
+    /// Boden oder auf einer Fensterkante darunter.
     pub fn end_drag(&mut self) {
         self.dragged = false;
-        self.falling = true;
-        self.vy = 0.0;
-        self.anim = AnimId::Fall;
-        self.frame_idx = 0;
-        self.frame_elapsed_ms = 0;
-        self.repeats_done = 0;
+        self.set_anim(AnimId::Fall);
+        self.start_fall(None);
     }
 
     /// Setzt die Position (samt Ziel-Monitor). Nur während Drag sinnvoll.
@@ -153,103 +169,246 @@ impl Sheep {
     ///
     /// * `segments` – ein GroundSegment pro Monitor (sortiert nach x_start,
     ///   passend zu den Overlay-Fenstern im Backend)
-    /// * `area_dims` – Live-Maße jeder DrawingArea in derselben Reihenfolge
+    /// * `world` – Live-Maße der Overlays und begehbare Fensterkanten
     ///
-    /// Beim Erreichen einer Segmentkante wird geprüft, ob das Nachbar­segment
-    /// nahtlos anschließt (X-Kanten in Kontakt, gleiche Bodenhöhe). Wenn ja,
-    /// wechselt das Schaf den Monitor, sonst dreht es um.
-    pub fn tick(
-        &mut self,
-        dt_ms: u32,
-        segments: &[GroundSegment],
-        area_dims: &[(i32, i32)],
-    ) {
+    /// Auf dem Boden: beim Erreichen einer Segmentkante wird geprüft, ob das
+    /// Nachbarsegment nahtlos anschließt (X-Kanten in Kontakt, gleiche
+    /// Bodenhöhe). Wenn ja, wechselt das Schaf den Monitor, sonst dreht es um
+    /// oder läuft aus dem Bild. Auf einem Fenster: das Schaf wandert mit dem
+    /// Fenster mit, fällt, wenn es verschwindet, und entscheidet an dessen
+    /// Kante zwischen Umdrehen, Runterspringen und Abrutschen.
+    pub fn tick(&mut self, dt_ms: u32, segments: &[GroundSegment], world: &World) {
         // Während Drag: nur Zappel-Frames animieren, sonst gar nichts.
         if self.dragged {
             self.advance_frames_loop(dt_ms);
             return;
         }
 
-        // Während Fall: Gravitation, Position, Bounce – dann ggf. FallHard.
+        // Während Fall: Gravitation, Position, Landung – in Teilschritten,
+        // damit Bounce/Landung auch bei ruckelnden Ticks stabil bleiben.
         if self.falling {
-            self.tick_falling(dt_ms, area_dims);
+            let mut rest = dt_ms;
+            while rest > 0 && self.falling {
+                let step = rest.min(16);
+                self.tick_falling(step, world);
+                rest -= step;
+            }
             if self.falling {
                 self.advance_frames_loop(dt_ms);
                 return;
             }
-            // Sonst gerade gelandet – Rest des Ticks (FallHard-Sequenz) läuft
+            // Sonst gerade gelandet – Rest des Ticks (Lande-Sequenz) läuft
             // durch die reguläre Zustandsmaschine unten weiter.
         }
 
         // 1) Frame + Zustands-Übergang
+        self.step_frames(dt_ms);
+        if self.falling {
+            // Eintritt in eine Fall-Animation (Sprung/Abrutschen).
+            return;
+        }
+
+        // 2) Halt auf dem Fenster prüfen: mitwandern oder abstürzen.
+        let mut seg = None;
+        if let Some(sup) = self.support {
+            match self.find_support(sup, world) {
+                Some(s) => {
+                    self.x += (s.win_x - sup.win_x) as f32;
+                    self.support = Some(Support { window: sup.window, win_x: s.win_x });
+                    seg = Some(s);
+                }
+                None => {
+                    self.set_anim(AnimId::Fall);
+                    self.start_fall(None);
+                    return;
+                }
+            }
+        }
+
+        // 3) Bewegung (nur wenn dx_per_tick > 0: Walk/Run)
+        let cur = def(self.anim);
+        if cur.dx_per_tick > 0 {
+            let dx = cur.dx_per_tick as f32 * self.forward() * (dt_ms as f32 / 16.0);
+            self.x += dx;
+            match seg {
+                Some(s) => self.check_window_edge(&s, world),
+                None => {
+                    self.check_floor_edge(segments, world);
+                    if self.falling {
+                        // Aus dem Bild gelaufen und oben neu eingestiegen.
+                        return;
+                    }
+                }
+            }
+        }
+
+        // 4) Höhe: Fensterkante bzw. Unterkante der Zeichenfläche des
+        //    aktuellen Monitors, Fallback auf Segment-y falls Overlay-Maße
+        //    noch unbekannt.
+        if let Some(s) = seg {
+            self.y = s.y as f32 - TILE_H as f32 + self.hang_offset;
+        } else {
+            let (_, ah) = world.dims(self.monitor_idx);
+            let bottom = if ah > 0 {
+                ah
+            } else {
+                segments.get(self.monitor_idx).map(|s| s.y).unwrap_or(0)
+            };
+            self.y = (bottom as u32).saturating_sub(TILE_H) as f32;
+        }
+    }
+
+    fn forward(&self) -> f32 {
+        if self.facing == Facing::Right { 1.0 } else { -1.0 }
+    }
+
+    /// Wechselt in eine neue Animation und löst deren Eintritts-Effekte aus.
+    fn set_anim(&mut self, next: AnimId) {
+        self.anim = next;
+        self.frame_idx = 0;
+        self.frame_elapsed_ms = 0;
+        self.repeats_done = 0;
+        self.on_enter(next);
+    }
+
+    /// Seiteneffekte beim Betreten einer Animation – alles, was über reines
+    /// Frame-Abspielen hinausgeht (Versatz, Physik-Start).
+    fn on_enter(&mut self, anim: AnimId) {
+        match anim {
+            AnimId::JumpDownAir => {
+                let fwd = self.forward();
+                self.start_fall(Some(AnimId::JumpDownLand));
+                self.vx = fwd * JUMP_VX;
+                self.vy = -JUMP_VY;
+            }
+            AnimId::FallWinA => {
+                // Vorderbeine über die Kante, Sprite rutscht etwas tiefer
+                // (Original: x -imageW*0.7, y +imageH*0.45).
+                self.x += self.forward() * TILE_W as f32 * 0.7;
+                self.hang_offset = TILE_H as f32 * 0.45;
+            }
+            AnimId::FallWinC => self.start_fall(Some(AnimId::FallWinD)),
+            _ => {}
+        }
+    }
+
+    /// Frame weiterschalten; am Sequenzende gewichteten Nachfolger wählen.
+    fn step_frames(&mut self, dt_ms: u32) {
         let cur = def(self.anim);
         self.frame_elapsed_ms += dt_ms;
         while self.frame_elapsed_ms >= cur.interval_ms {
             self.frame_elapsed_ms -= cur.interval_ms;
             self.frame_idx += 1;
-            if self.frame_idx >= cur.frames.len() {
-                self.frame_idx = 0;
-                self.repeats_done += 1;
-                if self.repeats_done >= cur.repeat {
-                    self.repeats_done = 0;
-                    let nxt = pick_next(cur.next, &mut self.rng);
-                    // Facing beim Ende der aktuellen Animation umkehren
-                    // (z. B. Rotate1A -> Rotate1B mit gedrehtem Sprite).
-                    if cur.flip_on_end {
-                        self.facing = match self.facing {
-                            Facing::Left => Facing::Right,
-                            Facing::Right => Facing::Left,
-                        };
-                    }
-                    if nxt != self.anim {
-                        self.anim = nxt;
-                        self.frame_idx = 0;
-                        self.frame_elapsed_ms = 0;
-                        break;
-                    }
-                }
+            if self.frame_idx < cur.frames.len() {
+                continue;
+            }
+            self.frame_idx = 0;
+            self.repeats_done += 1;
+            if self.repeats_done < cur.repeat {
+                continue;
+            }
+            self.repeats_done = 0;
+            // Beim Rauslaufen keine Zustandswechsel – sonst bleibt das Schaf
+            // halb im Bildrand stehen.
+            let nxt = if self.leaving {
+                self.anim
+            } else {
+                pick_next(cur.next, &mut self.rng)
+            };
+            // Facing beim Ende der aktuellen Animation umkehren
+            // (z. B. Rotate1A -> Rotate1B mit gedrehtem Sprite).
+            if cur.flip_on_end {
+                self.facing = match self.facing {
+                    Facing::Left => Facing::Right,
+                    Facing::Right => Facing::Left,
+                };
+            }
+            if nxt != self.anim {
+                self.set_anim(nxt);
+                break;
             }
         }
+    }
 
-        // Aktuelle Overlay-Maße für den Monitor, auf dem wir stehen.
-        let (aw, ah) = area_dims
-            .get(self.monitor_idx)
+    /// Sucht die Kante des Trägerfensters unter der Sprite-Mitte –
+    /// berücksichtigt dabei, dass das Fenster seit dem letzten Tick
+    /// verschoben worden sein kann. Hängt das Schaf gerade an der Kante,
+    /// reicht es, wenn die Kante in Reichweite ist.
+    fn find_support(&self, sup: Support, world: &World) -> Option<Surface> {
+        let surfaces = world.surfaces(self.monitor_idx);
+        let win_x = surfaces.iter().find(|s| s.window == sup.window)?.win_x;
+        let cx = self.x + (win_x - sup.win_x) as f32 + TILE_W as f32 / 2.0;
+        let tol = if self.hang_offset > 0.0 { TILE_W as f32 } else { 0.0 };
+        surfaces
+            .iter()
+            .find(|s| {
+                s.window == sup.window
+                    && cx >= s.x_start as f32 - tol
+                    && cx <= s.x_end as f32 + tol
+            })
             .copied()
-            .unwrap_or((0, 0));
+    }
 
-        // 2) Bewegung (nur wenn dx_per_tick > 0, also aktuell nur Walk)
-        let cur = def(self.anim);
-        if cur.dx_per_tick > 0 {
-            let sign = if self.facing == Facing::Right { 1.0 } else { -1.0 };
-            let dx = cur.dx_per_tick as f32 * sign * (dt_ms as f32 / 16.0);
-            self.x += dx;
-
-            let min_x = 0.0f32;
-            let max_x = (aw - TILE_W as i32).max(0) as f32;
-            if self.x <= min_x {
-                if !self.try_cross(segments, area_dims, Facing::Left) {
-                    self.x = min_x;
-                    self.begin_turn();
+    /// Am Ende einer Fensterkante: stehen bleiben und reagieren.
+    fn check_window_edge(&mut self, seg: &Surface, world: &World) {
+        let half = TILE_W as f32 / 2.0;
+        let cx = self.x + half;
+        let (aw, _) = world.dims(self.monitor_idx);
+        let clipped = match self.facing {
+            Facing::Right if cx >= seg.x_end as f32 - EDGE_MARGIN => {
+                self.x = seg.x_end as f32 - EDGE_MARGIN - half;
+                seg.x_end >= aw
+            }
+            Facing::Left if cx <= seg.x_start as f32 + EDGE_MARGIN => {
+                self.x = seg.x_start as f32 + EDGE_MARGIN - half;
+                seg.x_start <= 0
+            }
+            _ => return,
+        };
+        // Endet die Kante nur, weil der Monitor endet, geht es dahinter
+        // eigentlich weiter – dort nicht springen, sondern umdrehen.
+        let next = if clipped {
+            AnimId::Rotate1A
+        } else {
+            match self.anim {
+                AnimId::Run | AnimId::RunBegin | AnimId::RunEnd => {
+                    if self.rng.range(2) == 0 { AnimId::JumpDown } else { AnimId::Rotate1A }
                 }
-            } else if self.x >= max_x {
-                if !self.try_cross(segments, area_dims, Facing::Right) {
-                    self.x = max_x;
-                    self.begin_turn();
+                _ => {
+                    if self.rng.range(100) < 60 { AnimId::LookDown } else { AnimId::Rotate1A }
                 }
             }
-        }
-
-        // 3) Boden = Unterkante der Zeichenfläche des aktuellen Monitors,
-        //    Fallback auf Segment-y falls Overlay-Maße noch unbekannt.
-        let bottom = if ah > 0 {
-            ah
-        } else {
-            segments
-                .get(self.monitor_idx)
-                .map(|s| s.y)
-                .unwrap_or(0)
         };
-        self.y = (bottom as u32).saturating_sub(TILE_H) as f32;
+        self.set_anim(next);
+    }
+
+    /// Am Boden: Monitorwechsel, Umdrehen oder aus dem Bild laufen.
+    fn check_floor_edge(&mut self, segments: &[GroundSegment], world: &World) {
+        let (aw, _) = world.dims(self.monitor_idx);
+        if self.leaving {
+            if self.x <= -(TILE_W as f32) || self.x >= aw as f32 {
+                self.respawn_from_sky(world);
+            }
+            return;
+        }
+        let min_x = 0.0f32;
+        let max_x = (aw - TILE_W as i32).max(0) as f32;
+        let dir = if self.x <= min_x {
+            Facing::Left
+        } else if self.x >= max_x {
+            Facing::Right
+        } else {
+            return;
+        };
+        if self.try_cross(segments, world, dir) {
+            return;
+        }
+        if self.rng.range(100) < LEAVE_PERCENT {
+            self.leaving = true;
+            return;
+        }
+        self.x = if dir == Facing::Left { min_x } else { max_x };
+        self.begin_turn();
     }
 
     /// Reaktion beim Aufprall an der Segment-/Bildschirmkante.
@@ -265,10 +424,37 @@ impl Sheep {
             AnimId::Walk => self.rng.range(4) == 0,
             _ => false,
         };
-        self.anim = if ram { AnimId::WallRam } else { AnimId::Rotate1A };
-        self.frame_idx = 0;
-        self.frame_elapsed_ms = 0;
-        self.repeats_done = 0;
+        self.set_anim(if ram { AnimId::WallRam } else { AnimId::Rotate1A });
+    }
+
+    /// Neu von oben ins Bild fallen – zufälliger Monitor, zufällige Stelle.
+    fn respawn_from_sky(&mut self, world: &World) {
+        let n = world.area_dims.len().max(1) as u32;
+        let idx = self.rng.range(n) as usize;
+        let (aw, _) = world.dims(idx);
+        let x = self.rng.range((aw - TILE_W as i32).max(1) as u32) as f32;
+        self.facing = if self.rng.range(2) == 0 { Facing::Left } else { Facing::Right };
+        self.drop_in(idx, x);
+    }
+
+    /// Setzt das Schaf knapp oberhalb des Overlays und lässt es fallen.
+    fn drop_in(&mut self, monitor_idx: usize, x: f32) {
+        self.monitor_idx = monitor_idx;
+        self.x = x;
+        self.y = -(TILE_H as f32);
+        self.leaving = false;
+        self.set_anim(AnimId::Fall);
+        self.start_fall(None);
+    }
+
+    /// Fall-Physik einschalten. Die laufende Animation bleibt (Flug-Frame).
+    fn start_fall(&mut self, land_anim: Option<AnimId>) {
+        self.falling = true;
+        self.support = None;
+        self.hang_offset = 0.0;
+        self.vx = 0.0;
+        self.vy = 0.0;
+        self.land_anim = land_anim;
     }
 
     /// Advance frames der aktuellen Animation ohne jegliche Zustandsübergänge.
@@ -282,52 +468,79 @@ impl Sheep {
         }
     }
 
-    /// Physik während des Falls: Gravitation → Position → Bounce/Landung.
-    /// Setzt self.falling=false und wechselt auf FallHard, sobald gelandet.
-    fn tick_falling(&mut self, dt_ms: u32, area_dims: &[(i32, i32)]) {
+    /// Physik während des Falls: Gravitation → Position → Landung.
+    ///
+    /// Gelandet wird auf der höchsten Fensterkante, die die Füße in diesem
+    /// Tick von oben überquert haben und die unter der Sprite-Mitte liegt –
+    /// sonst auf dem Boden. Eine reine Nähe-Prüfung reicht nicht: bei hoher
+    /// Fallgeschwindigkeit legt das Schaf 30+ px pro Tick zurück.
+    fn tick_falling(&mut self, dt_ms: u32, world: &World) {
         const GRAVITY: f32 = 2400.0; // Pixel pro Sekunde²
         const BOUNCE_DAMP: f32 = 0.42;
         const BOUNCE_STOP: f32 = 80.0; // Pixel pro Sekunde – kleiner ⇒ landen
 
-        let (_aw, ah) = area_dims.get(self.monitor_idx).copied().unwrap_or((0, 0));
-        let floor = (ah - TILE_H as i32).max(0) as f32;
+        let (aw, ah) = world.dims(self.monitor_idx);
+        if ah <= 0 {
+            // Overlay noch nicht realisiert – Boden unbekannt, warten.
+            return;
+        }
 
         let dt_s = dt_ms as f32 / 1000.0;
+        let prev_bottom = self.y + TILE_H as f32;
         self.vy += GRAVITY * dt_s;
         self.y += self.vy * dt_s;
+        self.x += self.vx * dt_s;
+        let max_x = (aw - TILE_W as i32).max(0) as f32;
+        if self.x < 0.0 || self.x > max_x {
+            self.x = self.x.clamp(0.0, max_x);
+            self.vx = 0.0;
+        }
+        if self.vy <= 0.0 {
+            return; // steigt noch
+        }
 
-        if self.y >= floor {
-            self.y = floor;
-            if self.vy > BOUNCE_STOP {
-                // bouncen – Richtung umkehren, Energie verlieren
-                self.vy = -self.vy * BOUNCE_DAMP;
-            } else {
-                // Endgültig gelandet – zufällig FallHard oder das etwas
-                // elastischere Boing wählen, damit Landungen abwechslungsreich
-                // aussehen.
-                self.vy = 0.0;
-                self.falling = false;
-                self.anim = if self.rng.range(2) == 0 {
-                    AnimId::FallHard
-                } else {
-                    AnimId::Boing
-                };
-                self.frame_idx = 0;
-                self.frame_elapsed_ms = 0;
-                self.repeats_done = 0;
+        let new_bottom = self.y + TILE_H as f32;
+        let cx = self.x + TILE_W as f32 / 2.0;
+        let mut hit: Option<(f32, Option<Surface>)> = None;
+        for s in world.surfaces(self.monitor_idx) {
+            let sy = s.y as f32;
+            let crossed = prev_bottom <= sy + 0.5 && new_bottom >= sy;
+            let under = cx >= s.x_start as f32 && cx <= s.x_end as f32;
+            if crossed && under && hit.map_or(true, |(hy, _)| sy < hy) {
+                hit = Some((sy, Some(*s)));
             }
         }
+        if hit.is_none() && new_bottom >= ah as f32 {
+            hit = Some((ah as f32, None));
+        }
+        let Some((ground_y, seg)) = hit else { return };
+
+        self.y = ground_y - TILE_H as f32;
+        if self.land_anim.is_none() && self.vy > BOUNCE_STOP {
+            // bouncen – Richtung umkehren, Energie verlieren
+            self.vy = -self.vy * BOUNCE_DAMP;
+            return;
+        }
+
+        // Endgültig gelandet. Ohne vorgegebene Landeanimation zufällig
+        // FallHard oder das elastischere Boing, damit Landungen
+        // abwechslungsreich aussehen.
+        self.falling = false;
+        self.vx = 0.0;
+        self.vy = 0.0;
+        self.support = seg.map(|s| Support { window: s.window, win_x: s.win_x });
+        let next = match self.land_anim.take() {
+            Some(a) => a,
+            None if self.rng.range(2) == 0 => AnimId::FallHard,
+            None => AnimId::Boing,
+        };
+        self.set_anim(next);
     }
 
     /// Versucht, in Bewegungsrichtung auf den Nachbarmonitor zu wechseln.
     /// Voraussetzung: das Nachbarsegment schließt in X nahtlos an und hat
     /// (annähernd) dieselbe Bodenhöhe. Rückgabe: true wenn gewechselt.
-    fn try_cross(
-        &mut self,
-        segments: &[GroundSegment],
-        area_dims: &[(i32, i32)],
-        dir: Facing,
-    ) -> bool {
+    fn try_cross(&mut self, segments: &[GroundSegment], world: &World, dir: Facing) -> bool {
         const KANTE_TOLERANZ: i32 = 8;
         let cur = match segments.get(self.monitor_idx) {
             Some(s) => *s,
@@ -360,12 +573,108 @@ impl Sheep {
                 if (prev.y - cur.y).abs() > KANTE_TOLERANZ {
                     return false;
                 }
-                let (prev_w, _) = area_dims.get(prev_idx).copied().unwrap_or((0, 0));
+                let (prev_w, _) = world.dims(prev_idx);
                 self.monitor_idx = prev_idx;
                 self.x = (prev_w - TILE_W as i32).max(0) as f32;
                 self.facing = Facing::Left;
                 true
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DIMS: [(i32, i32); 1] = [(1920, 1080)];
+    const SEGS: [GroundSegment; 1] = [GroundSegment { x_start: 0, x_end: 1920, y: 1080 }];
+
+    fn surface(window: WindowId, x_start: i32, x_end: i32, y: i32) -> Surface {
+        Surface { window, x_start, x_end, y, win_x: x_start }
+    }
+
+    /// Tickt, bis das Schaf nicht mehr fällt (max. 10 s Simulationszeit).
+    fn tick_until_landed(s: &mut Sheep, world: &World, dt: u32) {
+        for _ in 0..(10_000 / dt) {
+            s.tick(dt, &SEGS, world);
+            if !s.falling {
+                return;
+            }
+        }
+        panic!("Schaf ist nicht gelandet");
+    }
+
+    #[test]
+    fn lands_on_window_below() {
+        let surfaces = vec![vec![surface(1, 100, 900, 300)]];
+        let world = World { area_dims: &DIMS, surfaces: &surfaces };
+        let mut s = Sheep::new_at(0, 400.0, 42);
+        tick_until_landed(&mut s, &world, 16);
+        assert_eq!(s.support_window(), Some(1));
+        assert_eq!(s.y + TILE_H as f32, 300.0);
+    }
+
+    #[test]
+    fn fast_fall_does_not_tunnel_through_edge() {
+        // 100-ms-Ticks: das Schaf legt am Ende >200 px pro Tick zurück.
+        let surfaces = vec![vec![surface(1, 100, 900, 900)]];
+        let world = World { area_dims: &DIMS, surfaces: &surfaces };
+        let mut s = Sheep::new_at(0, 400.0, 7);
+        tick_until_landed(&mut s, &world, 100);
+        assert_eq!(s.support_window(), Some(1));
+    }
+
+    #[test]
+    fn misses_window_when_center_is_outside() {
+        let surfaces = vec![vec![surface(1, 100, 300, 500)]];
+        let world = World { area_dims: &DIMS, surfaces: &surfaces };
+        let mut s = Sheep::new_at(0, 600.0, 1);
+        tick_until_landed(&mut s, &world, 16);
+        assert_eq!(s.support_window(), None);
+        assert_eq!(s.y + TILE_H as f32, 1080.0);
+    }
+
+    #[test]
+    fn follows_moved_window_and_falls_when_it_vanishes() {
+        let surfaces = vec![vec![surface(1, 100, 900, 300)]];
+        let world = World { area_dims: &DIMS, surfaces: &surfaces };
+        let mut s = Sheep::new_at(0, 400.0, 3);
+        tick_until_landed(&mut s, &world, 16);
+        let x0 = s.x;
+
+        // Fenster um (+50, +20) verschoben. Landeanimationen haben dx=0,
+        // die Verschiebung kommt also allein vom Mitwandern.
+        let moved = vec![vec![Surface { window: 1, x_start: 150, x_end: 950, y: 320, win_x: 150 }]];
+        s.tick(16, &SEGS, &World { area_dims: &DIMS, surfaces: &moved });
+        assert_eq!(s.x, x0 + 50.0);
+        assert_eq!(s.y + TILE_H as f32, 320.0);
+        assert!(!s.falling);
+
+        // Fenster weg (geschlossen/minimiert) → Absturz.
+        let empty: Vec<Vec<Surface>> = vec![vec![]];
+        s.tick(16, &SEGS, &World { area_dims: &DIMS, surfaces: &empty });
+        assert!(s.falling);
+        assert_eq!(s.support_window(), None);
+    }
+
+    #[test]
+    fn walks_off_window_eventually_and_reaches_floor() {
+        // Schmale Kante: das Schaf muss früher oder später springen oder
+        // abrutschen und unten auf dem Boden ankommen.
+        let surfaces = vec![vec![surface(1, 300, 500, 400)]];
+        let world = World { area_dims: &DIMS, surfaces: &surfaces };
+        let mut s = Sheep::new_at(0, 380.0, 99);
+        tick_until_landed(&mut s, &world, 16);
+        assert_eq!(s.support_window(), Some(1));
+        let mut reached_floor = false;
+        for _ in 0..(600_000 / 16) {
+            s.tick(16, &SEGS, &world);
+            if !s.falling && s.support_window().is_none() && s.y + TILE_H as f32 == 1080.0 {
+                reached_floor = true;
+                break;
+            }
+        }
+        assert!(reached_floor);
     }
 }

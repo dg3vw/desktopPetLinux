@@ -13,7 +13,14 @@ use gtk4::{Application, ApplicationWindow, DrawingArea};
 use crate::core::anim::{TILE_H, TILE_W, frame_to_tile};
 use crate::core::geometry::Rect;
 use crate::core::sheep::{Facing, Sheep};
+use crate::core::surfaces::{walkable_surfaces, Surface};
+use crate::core::world::World;
+use crate::platform::x11_windows;
 use crate::platform::Platform;
+
+/// Wie oft die Fensterliste neu gelesen wird. Pro Abfrage ein paar X11-
+/// Roundtrips je Fenster – deutlich seltener als der Animations-Tick.
+const WINDOW_POLL_MS: u64 = 250;
 
 struct OverlayHandle {
     area: gtk4::glib::WeakRef<DrawingArea>,
@@ -33,16 +40,13 @@ struct DragState {
 
 pub struct LinuxPlatform {
     sprite_bytes: &'static [u8],
+    /// Fensteroberkanten als Laufflächen anbieten (Plan Abschnitt 6).
+    walk_on_windows: bool,
 }
 
 impl LinuxPlatform {
-    #[allow(dead_code)]
-    pub fn new() -> Self {
-        Self::with_color(crate::core::anim::SpriteColor::Default)
-    }
-
-    pub fn with_color(color: crate::core::anim::SpriteColor) -> Self {
-        Self { sprite_bytes: color.png_bytes() }
+    pub fn new(color: crate::core::anim::SpriteColor, walk_on_windows: bool) -> Self {
+        Self { sprite_bytes: color.png_bytes(), walk_on_windows }
     }
 }
 
@@ -77,7 +81,7 @@ impl Platform for LinuxPlatform {
 
     fn run<TickFn>(self, sheeps: Vec<Sheep>, tick_ms: u32, tick: TickFn) -> Result<(), String>
     where
-        TickFn: FnMut(&mut [Sheep], u32, &[(i32, i32)]) + 'static,
+        TickFn: FnMut(&mut [Sheep], u32, &World) + 'static,
     {
         let app = Application::builder()
             .application_id("ch.local.desktop_sheep")
@@ -86,9 +90,10 @@ impl Platform for LinuxPlatform {
         let sheeps = Rc::new(RefCell::new(sheeps));
         let tick = Rc::new(RefCell::new(tick));
         let sprite_bytes = self.sprite_bytes;
+        let walk_on_windows = self.walk_on_windows;
 
         app.connect_activate(move |app| {
-            build_ui(app, sheeps.clone(), tick.clone(), tick_ms, sprite_bytes);
+            build_ui(app, sheeps.clone(), tick.clone(), tick_ms, sprite_bytes, walk_on_windows);
         });
 
         // SIGINT (Ctrl+C im Terminal) sauber abfangen und Application beenden.
@@ -130,8 +135,9 @@ fn build_ui<TickFn>(
     tick: Rc<RefCell<TickFn>>,
     tick_ms: u32,
     sprite_bytes: &'static [u8],
+    walk_on_windows: bool,
 ) where
-    TickFn: FnMut(&mut [Sheep], u32, &[(i32, i32)]) + 'static,
+    TickFn: FnMut(&mut [Sheep], u32, &World) + 'static,
 {
     let display = gdk4::Display::default().expect("kein GDK-Display");
 
@@ -161,6 +167,10 @@ fn build_ui<TickFn>(
 
     let overlays: Rc<RefCell<Vec<OverlayHandle>>> =
         Rc::new(RefCell::new(Vec::with_capacity(mons.len())));
+
+    // Begehbare Fensterkanten pro Overlay; aktualisiert vom Fenster-Poller.
+    let surfaces: Rc<RefCell<Vec<Vec<Surface>>>> =
+        Rc::new(RefCell::new(vec![Vec::new(); mons.len()]));
 
     // Monitor-Rechtecke einmal einsammeln – für Cross-Monitor-Drag brauchen
     // wir sie im Drag-Handler, um den Ziel-Monitor aus Root-Koordinaten
@@ -333,6 +343,7 @@ fn build_ui<TickFn>(
     let sheeps_tick = sheeps.clone();
     let tick_cb = tick.clone();
     let overlays_tick = overlays.clone();
+    let surfaces_tick = surfaces.clone();
     let last = Rc::new(RefCell::new(Instant::now()));
     glib::timeout_add_local(std::time::Duration::from_millis(tick_ms as u64), move || {
         let now = Instant::now();
@@ -347,7 +358,9 @@ fn build_ui<TickFn>(
 
         {
             let mut s = sheeps_tick.borrow_mut();
-            (tick_cb.borrow_mut())(&mut *s, dt.max(1), &dims);
+            let surf = surfaces_tick.borrow();
+            let world = World { area_dims: &dims, surfaces: &surf };
+            (tick_cb.borrow_mut())(&mut *s, dt.max(1), &world);
         }
 
         // Input-Region pro Overlay aus Sprite-Bboxes bauen und setzen –
@@ -372,6 +385,10 @@ fn build_ui<TickFn>(
         glib::ControlFlow::Continue
     });
 
+    if walk_on_windows {
+        start_window_poller(overlays.clone(), surfaces.clone());
+    }
+
     // Cursor-Poller: bei Mausbewegung alle schlafenden Sheeps wecken.
     let poller = PointerPoller::new();
     let sheeps_wake = sheeps.clone();
@@ -384,6 +401,83 @@ fn build_ui<TickFn>(
                 }
             }
         }
+        glib::ControlFlow::Continue
+    });
+}
+
+/// Liest periodisch die Fensterliste und berechnet daraus die begehbaren
+/// Kanten pro Overlay. Läuft auf GDKs eigener X-Verbindung innerhalb eines
+/// Error-Traps – verschwindet ein Fenster mitten in der Abfrage, wird das
+/// `BadWindow` geschluckt statt den Prozess zu beenden.
+///
+/// Mit `DESKTOP_SHEEP_DEBUG=1` werden Fenster und Kanten bei jeder Änderung
+/// auf stderr ausgegeben (zum Abgleich mit `wmctrl -lG` / `xprop`).
+fn start_window_poller(
+    overlays: Rc<RefCell<Vec<OverlayHandle>>>,
+    surfaces: Rc<RefCell<Vec<Vec<Surface>>>>,
+) {
+    use gdk4_x11::prelude::*;
+    let Some(display) = gdk4::Display::default() else { return };
+    let Ok(x11display) = display.downcast::<gdk4_x11::X11Display>() else {
+        eprintln!("Kein X11-Display – Fenster-Laufen deaktiviert.");
+        return;
+    };
+    let debug = std::env::var_os("DESKTOP_SHEEP_DEBUG").is_some();
+    let atoms = unsafe { x11_windows::Atoms::new(x11display.xdisplay()) };
+    let mut last_debug = String::new();
+
+    glib::timeout_add_local(std::time::Duration::from_millis(WINDOW_POLL_MS), move || {
+        let xdisp = unsafe { x11display.xdisplay() };
+        x11display.error_trap_push();
+        let windows = unsafe { x11_windows::list_windows(xdisp, &atoms) };
+        // Root-Rechteck jeder Overlay-Zeichenfläche: tatsächliche Fenster-
+        // position (der WM kann verschieben) + Live-Größe der DrawingArea.
+        let overlay_rects: Vec<Rect> = overlays
+            .borrow()
+            .iter()
+            .map(|o| {
+                let (Some(win), Some(area)) = (o.window.upgrade(), o.area.upgrade()) else {
+                    return Rect { x: 0, y: 0, width: 0, height: 0 };
+                };
+                let origin = win
+                    .native()
+                    .and_then(|n| n.surface())
+                    .and_then(|s| s.downcast::<gdk4_x11::X11Surface>().ok())
+                    .and_then(|s| unsafe { x11_windows::root_origin(xdisp, s.xid()) })
+                    .unwrap_or((0, 0));
+                Rect { x: origin.0, y: origin.1, width: area.width(), height: area.height() }
+            })
+            .collect();
+        let names: Vec<String> = if debug {
+            windows.iter().map(|w| unsafe { x11_windows::window_name(xdisp, w.id as _) }).collect()
+        } else {
+            Vec::new()
+        };
+        x11display.error_trap_pop_ignored();
+
+        let new_surfaces = walkable_surfaces(&windows, &overlay_rects);
+        if debug {
+            let mut out = String::new();
+            for (o, r) in overlay_rects.iter().enumerate() {
+                out += &format!("overlay {o}: {r:?}\n");
+            }
+            for (w, name) in windows.iter().zip(&names) {
+                out += &format!("  win 0x{:08x} {:?} {name:?}\n", w.id, w.rect);
+            }
+            for (o, list) in new_surfaces.iter().enumerate() {
+                for e in list {
+                    out += &format!(
+                        "  kante overlay {o}: 0x{:08x} x={}..{} y={}\n",
+                        e.window, e.x_start, e.x_end, e.y
+                    );
+                }
+            }
+            if out != last_debug {
+                eprint!("--- Fenster/Kanten ---\n{out}");
+                last_debug = out;
+            }
+        }
+        *surfaces.borrow_mut() = new_surfaces;
         glib::ControlFlow::Continue
     });
 }

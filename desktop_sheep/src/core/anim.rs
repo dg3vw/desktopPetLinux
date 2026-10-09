@@ -91,6 +91,22 @@ pub enum AnimId {
     /// Nutzt die "Aua"-Sprites aus Zeile 4 des Sheets (Frames 48/49). Ersetzt
     /// bei Bedarf den Rotate1A/B-Ablauf an einer Segmentkante.
     WallRam,
+    /// look_down (id=43): an der Fensterkante runterschauen und überlegen.
+    LookDown,
+    /// jump_down (id=44): Absprung vorbereiten.
+    JumpDown,
+    /// jump_down2 (id=45): in der Luft – Physik übernimmt bis zur Landung.
+    JumpDownAir,
+    /// jump_down3 (id=46): Landung nach dem Sprung.
+    JumpDownLand,
+    /// fall_wina (id=51): über die Kante rutschen, umdrehen.
+    FallWinA,
+    /// fall_winb (id=52): an der Kante hängen und strampeln.
+    FallWinB,
+    /// fall_winc (id=53): loslassen und fallen.
+    FallWinC,
+    /// fall_wind (id=54): benommen aufrappeln.
+    FallWinD,
 }
 
 pub struct AnimDef {
@@ -307,6 +323,93 @@ pub const FALL_HARD: AnimDef = AnimDef {
     flip_on_end: false,
 };
 
+/// LookDown (id=43): an der Fensterkante stehen und runterschauen. Danach
+/// umdrehen, runterspringen oder über die Kante abrutschen.
+pub const LOOK_DOWN: AnimDef = AnimDef {
+    frames: &[6, 78, 78, 78, 79, 80, 79, 78, 78, 78, 78, 78],
+    interval_ms: 120,
+    dx_per_tick: 0,
+    repeat: 1,
+    next: &[
+        (40, AnimId::Rotate1A),
+        (30, AnimId::JumpDown),
+        (30, AnimId::FallWinA),
+    ],
+    flip_on_end: false,
+};
+
+/// JumpDown (id=44): Anlauf zum Sprung. Die eigentliche Flugbahn rechnet
+/// die Fall-Physik ab JumpDownAir.
+pub const JUMP_DOWN: AnimDef = AnimDef {
+    frames: &[31, 30, 30, 4, 4, 4, 21],
+    interval_ms: 150,
+    dx_per_tick: 0,
+    repeat: 1,
+    next: &[(100, AnimId::JumpDownAir)],
+    flip_on_end: false,
+};
+
+/// JumpDownAir (id=45): Flug-Frame; Ende bestimmt die Landung, nicht `next`.
+pub const JUMP_DOWN_AIR: AnimDef = AnimDef {
+    frames: &[25],
+    interval_ms: 50,
+    dx_per_tick: 0,
+    repeat: 1,
+    next: &[(100, AnimId::JumpDownAir)],
+    flip_on_end: false,
+};
+
+/// JumpDownLand (id=46): abfedern und weiterlaufen.
+pub const JUMP_DOWN_LAND: AnimDef = AnimDef {
+    frames: &[24, 23, 23, 23, 23, 23, 31, 3, 3, 3, 3],
+    interval_ms: 100,
+    dx_per_tick: 0,
+    repeat: 1,
+    next: &[(100, AnimId::Walk)],
+    flip_on_end: false,
+};
+
+/// FallWinA (id=51): Schaf rutscht mit den Vorderbeinen über die Kante und
+/// dreht sich dabei zum Fenster um (Versatz setzt Sheep beim Eintritt).
+pub const FALL_WIN_A: AnimDef = AnimDef {
+    frames: &[77],
+    interval_ms: 100,
+    dx_per_tick: 0,
+    repeat: 1,
+    next: &[(100, AnimId::FallWinB)],
+    flip_on_end: true,
+};
+
+/// FallWinB (id=52): an der Kante hängen und strampeln.
+pub const FALL_WIN_B: AnimDef = AnimDef {
+    frames: &[40, 41],
+    interval_ms: 100,
+    dx_per_tick: 0,
+    repeat: 14,
+    next: &[(100, AnimId::FallWinC)],
+    flip_on_end: false,
+};
+
+/// FallWinC (id=53): Fall-Frame; Ende bestimmt die Landung, nicht `next`.
+pub const FALL_WIN_C: AnimDef = AnimDef {
+    frames: &[29],
+    interval_ms: 50,
+    dx_per_tick: 0,
+    repeat: 1,
+    next: &[(100, AnimId::FallWinC)],
+    flip_on_end: false,
+};
+
+/// FallWinD (id=54): nach dem Aufprall benommen aufrappeln.
+pub const FALL_WIN_D: AnimDef = AnimDef {
+    frames: &[45, 45, 18, 76, 6],
+    interval_ms: 400,
+    dx_per_tick: 0,
+    repeat: 1,
+    next: &[(100, AnimId::Walk)],
+    flip_on_end: false,
+};
+
 pub fn def(id: AnimId) -> &'static AnimDef {
     match id {
         AnimId::Walk => &WALK,
@@ -327,6 +430,14 @@ pub fn def(id: AnimId) -> &'static AnimDef {
         AnimId::FallHard => &FALL_HARD,
         AnimId::Boing => &BOING,
         AnimId::WallRam => &WALL_RAM,
+        AnimId::LookDown => &LOOK_DOWN,
+        AnimId::JumpDown => &JUMP_DOWN,
+        AnimId::JumpDownAir => &JUMP_DOWN_AIR,
+        AnimId::JumpDownLand => &JUMP_DOWN_LAND,
+        AnimId::FallWinA => &FALL_WIN_A,
+        AnimId::FallWinB => &FALL_WIN_B,
+        AnimId::FallWinC => &FALL_WIN_C,
+        AnimId::FallWinD => &FALL_WIN_D,
     }
 }
 
