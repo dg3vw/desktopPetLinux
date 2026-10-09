@@ -127,6 +127,30 @@ pub enum AnimId {
     ClimbDown,
     /// vertical_walk_over (id=42): unten wieder auf die Füße kommen.
     ClimbOver,
+    /// jump (id=25): Bocksprung aus dem Sprint heraus.
+    Jump,
+    /// sleep3a (id=19) Vorlauf: zum Betrachter drehen, Augen fallen zu.
+    Sleep3Yawn,
+    /// sleep3a (id=19) Loop-Teil: von vorn sitzend schlafen.
+    Sleep3,
+    /// sleep3b (id=20): aufwachen, zurückdrehen.
+    Sleep3Wake,
+    /// fall soft (id=9): weiche Landung auf dem Hintern.
+    FallSoft,
+    /// batha (id=21): als Meteor schräg ins Bild sausen.
+    BathFly,
+    /// bathb (id=22): brennend/verkohlt weiterfliegen bis in die Wanne.
+    BathBurn,
+    /// bathc (id=47): in der Badewanne entspannen.
+    BathSoak,
+    /// bathd (id=48): aus der Wanne steigen.
+    BathOut,
+    /// blacksheepa (id=28): zum Treffpunkt rennen.
+    VisitRun,
+    /// blacksheepb (id=29): die letzten Meter gehen.
+    VisitWalk,
+    /// blacksheepc (id=30): vor dem schwarzen Schaf erröten.
+    VisitBlush,
 }
 
 pub struct AnimDef {
@@ -151,9 +175,10 @@ pub const WALK: AnimDef = AnimDef {
     dx_per_tick: 2,
     repeat: 6,
     next: &[
-        (67, AnimId::Walk),
+        (62, AnimId::Walk),
         (7, AnimId::YawnSleep),
         (5, AnimId::Sleep2Yawn),
+        (5, AnimId::Sleep3Yawn),
         (6, AnimId::Eat),
         (10, AnimId::RunBegin),
         (5, AnimId::Rotate1A),
@@ -272,7 +297,7 @@ pub const RUN: AnimDef = AnimDef {
     interval_ms: 100,
     dx_per_tick: 5,
     repeat: 6,
-    next: &[(70, AnimId::Run), (30, AnimId::RunEnd)],
+    next: &[(60, AnimId::Run), (25, AnimId::RunEnd), (15, AnimId::Jump)],
     flip_on_end: false,
 };
 
@@ -527,6 +552,132 @@ pub const CLIMB_OVER: AnimDef = AnimDef {
     flip_on_end: false,
 };
 
+/// Jump (id=25): Bocksprung. Die Flugkurve (Höhe über dem Boden) rechnet
+/// Sheep aus dem Fortschritt der Sequenz, danach geht's im Sprint weiter.
+pub const JUMP: AnimDef = AnimDef {
+    frames: &[76, 30, 30, 30, 30, 23, 23, 23, 23, 23, 24, 24, 24, 24, 77],
+    interval_ms: 70,
+    dx_per_tick: 4,
+    repeat: 1,
+    next: &[(100, AnimId::Run)],
+    flip_on_end: false,
+};
+
+/// Sleep3Yawn (id=19, Frames vor `repeatfrom`): zum Betrachter drehen,
+/// hinsetzen, Augen fallen langsam zu.
+pub const SLEEP3_YAWN: AnimDef = AnimDef {
+    frames: &[3, 9, 10, 34, 35, 34, 35, 36],
+    interval_ms: 250,
+    dx_per_tick: 0,
+    repeat: 1,
+    next: &[(100, AnimId::Sleep3)],
+    flip_on_end: false,
+};
+
+/// Sleep3 (id=19, Loop-Teil): mit geschlossenen Augen sitzen. Wie SLEEP
+/// endet es regulär über Mausbewegung; `repeat` ist nur der Notaus.
+pub const SLEEP3: AnimDef = AnimDef {
+    frames: &[36],
+    interval_ms: 700,
+    dx_per_tick: 0,
+    repeat: 300,
+    next: &[(100, AnimId::Sleep3Wake)],
+    flip_on_end: false,
+};
+
+/// Sleep3Wake (id=20): blinzeln, aufwachen, zurück in die Laufrichtung.
+pub const SLEEP3_WAKE: AnimDef = AnimDef {
+    frames: &[35, 36, 36, 35, 34, 34, 34, 10, 9],
+    interval_ms: 200,
+    dx_per_tick: 0,
+    repeat: 1,
+    next: &[(100, AnimId::Walk)],
+    flip_on_end: false,
+};
+
+/// FallSoft (id=9, ohne den Flug-Frame 133): auf den Hintern plumpsen
+/// und wieder umdrehen.
+pub const FALL_SOFT: AnimDef = AnimDef {
+    frames: &[49, 13, 12, 6],
+    interval_ms: 250,
+    dx_per_tick: 0,
+    repeat: 1,
+    next: &[(100, AnimId::Walk)],
+    flip_on_end: false,
+};
+
+/// BathFly (id=21/22): Schaf saust schräg herein und fängt Feuer.
+/// Die Flugbahn steuert Sheep, nicht `dx_per_tick`.
+pub const BATH_FLY: AnimDef = AnimDef {
+    frames: &[134, 134, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143],
+    interval_ms: 90,
+    dx_per_tick: 0,
+    repeat: 1,
+    next: &[(100, AnimId::BathBurn)],
+    flip_on_end: false,
+};
+
+/// BathBurn (id=22, Ende): verkohlt weiterfliegen bis zur Wanne.
+pub const BATH_BURN: AnimDef = AnimDef {
+    frames: &[144, 145],
+    interval_ms: 90,
+    dx_per_tick: 0,
+    repeat: 1,
+    next: &[(100, AnimId::BathBurn)],
+    flip_on_end: false,
+};
+
+/// BathSoak (id=47): nur der Kopf schaut aus dem Wasser, Augen fallen zu.
+pub const BATH_SOAK: AnimDef = AnimDef {
+    frames: &[169, 169, 169, 170, 171, 171, 171, 170, 169, 169],
+    interval_ms: 200,
+    dx_per_tick: 0,
+    repeat: 3,
+    next: &[(100, AnimId::BathOut)],
+    flip_on_end: false,
+};
+
+/// BathOut (id=48): in der Wanne aufstehen (20 px höher, siehe Sheep)
+/// und herausdrehen.
+pub const BATH_OUT: AnimDef = AnimDef {
+    frames: &[119, 81, 81, 82, 82, 10],
+    interval_ms: 180,
+    dx_per_tick: 0,
+    repeat: 1,
+    next: &[(100, AnimId::Rotate1B)],
+    flip_on_end: false,
+};
+
+/// VisitRun (id=28): zum Treffpunkt sprinten. Ziel steuert Sheep.
+pub const VISIT_RUN: AnimDef = AnimDef {
+    frames: &[5, 4, 4],
+    interval_ms: 100,
+    dx_per_tick: 5,
+    repeat: 1,
+    next: &[(100, AnimId::VisitRun)],
+    flip_on_end: false,
+};
+
+/// VisitWalk (id=29): die letzten Meter gehen.
+pub const VISIT_WALK: AnimDef = AnimDef {
+    frames: &[2, 3],
+    interval_ms: 200,
+    dx_per_tick: 2,
+    repeat: 1,
+    next: &[(100, AnimId::VisitWalk)],
+    flip_on_end: false,
+};
+
+/// VisitBlush (id=30): anschauen, erröten (127–130), wieder fassen.
+pub const VISIT_BLUSH: AnimDef = AnimDef {
+    frames: &[8, 3, 3, 3, 127, 128, 129, 130, 130, 130, 130, 129, 128, 127, 3, 3, 3],
+    interval_ms: 250,
+    dx_per_tick: 0,
+    repeat: 1,
+    next: &[(100, AnimId::Walk)],
+    flip_on_end: false,
+};
+
 pub fn def(id: AnimId) -> &'static AnimDef {
     match id {
         AnimId::Walk => &WALK,
@@ -564,6 +715,18 @@ pub fn def(id: AnimId) -> &'static AnimDef {
         AnimId::TopWalkEnd => &TOP_WALK_END,
         AnimId::ClimbDown => &CLIMB_DOWN,
         AnimId::ClimbOver => &CLIMB_OVER,
+        AnimId::Jump => &JUMP,
+        AnimId::Sleep3Yawn => &SLEEP3_YAWN,
+        AnimId::Sleep3 => &SLEEP3,
+        AnimId::Sleep3Wake => &SLEEP3_WAKE,
+        AnimId::FallSoft => &FALL_SOFT,
+        AnimId::BathFly => &BATH_FLY,
+        AnimId::BathBurn => &BATH_BURN,
+        AnimId::BathSoak => &BATH_SOAK,
+        AnimId::BathOut => &BATH_OUT,
+        AnimId::VisitRun => &VISIT_RUN,
+        AnimId::VisitWalk => &VISIT_WALK,
+        AnimId::VisitBlush => &VISIT_BLUSH,
     }
 }
 

@@ -215,7 +215,11 @@ fn build_ui<TickFn>(
         area.set_draw_func(move |_, cr, _w, _h| {
             let all = sheeps_draw.borrow();
             for s in all.iter().filter(|s| s.monitor_idx == my_idx) {
-                draw_sheep(cr, s, sprite_draw.as_ref());
+                if let Some(p) = s.prop() {
+                    draw_tile(cr, sprite_draw.as_ref(), p.frame, p.x, p.y, p.mirrored, p.alpha);
+                }
+                let mirrored = s.facing == Facing::Right;
+                draw_tile(cr, sprite_draw.as_ref(), s.current_frame(), s.x, s.y, mirrored, 1.0);
             }
         });
 
@@ -494,26 +498,33 @@ fn start_window_poller(
     });
 }
 
-fn draw_sheep(cr: &cairo::Context, s: &Sheep, sprite: &Option<ImageSurface>) {
-    let f = s.current_frame();
-    let (col, row) = frame_to_tile(f);
+/// Zeichnet eine Kachel des Sprite-Sheets an (x, y). Die Kacheln schauen
+/// nach links; `mirrored` spiegelt horizontal.
+fn draw_tile(
+    cr: &cairo::Context,
+    sprite: &Option<ImageSurface>,
+    frame: u32,
+    x: f32,
+    y: f32,
+    mirrored: bool,
+    alpha: f32,
+) {
+    let Some(img) = sprite else { return };
+    let (col, row) = frame_to_tile(frame);
     let sx = (col * TILE_W) as f64;
     let sy = (row * TILE_H) as f64;
-    let dst_x = s.x as f64;
-    let dst_y = s.y as f64;
 
     cr.save().ok();
-    if s.facing == Facing::Right {
-        cr.translate(dst_x + TILE_W as f64, dst_y);
+    if mirrored {
+        cr.translate(x as f64 + TILE_W as f64, y as f64);
         cr.scale(-1.0, 1.0);
     } else {
-        cr.translate(dst_x, dst_y);
+        cr.translate(x as f64, y as f64);
     }
-    if let Some(img) = sprite {
-        cr.set_source_surface(img, -sx, -sy).ok();
-        cr.rectangle(0.0, 0.0, TILE_W as f64, TILE_H as f64);
-        cr.fill().ok();
-    }
+    cr.set_source_surface(img, -sx, -sy).ok();
+    cr.rectangle(0.0, 0.0, TILE_W as f64, TILE_H as f64);
+    cr.clip();
+    cr.paint_with_alpha(alpha as f64).ok();
     cr.restore().ok();
 }
 

@@ -10,7 +10,7 @@ unterstützt.
 
 ## Features
 
-- Laufen, Sprinten, Umdrehen, gelegentlich gegen die Wand rennen
+- Laufen, Sprinten, Bocksprünge, Umdrehen, gelegentlich gegen die Wand rennen
 - Laufen auf Fensteroberkanten: zieht man das Fenster unter dem Schaf weg
   (oder schließt, minimiert, verdeckt es), hängt es kurz verdutzt in der
   Luft und fällt dann auf das nächste Fenster oder den Boden; an der
@@ -20,8 +20,11 @@ unterstützt.
   landet es von selbst wieder auf Fenstern; sonst klettert es an der
   gegenüberliegenden Wand wieder herunter
 - Fällt beim Start von oben ins Bild und landet dabei ggf. auf einem Fenster;
-  läuft gelegentlich seitlich aus dem Bild und kommt von oben wieder
-- Grasen, Gähnen/Schlafen, Sitzen/Dösen – Mausbewegung weckt schlafende Schafe
+  läuft gelegentlich seitlich aus dem Bild und kommt wieder – meist von oben,
+  manchmal als brennender Meteor, der in einer Badewanne landet, oder es
+  trifft in der Bildmitte ein schwarzes Schaf und errötet
+- Grasen, Gähnen/Schlafen, Sitzen/Dösen, von vorn sitzend schlafen –
+  Mausbewegung weckt schlafende Schafe
 - Schaf mit der Maus packen und wegziehen, auch über Monitorgrenzen; beim
   Loslassen fällt es mit Schwerkraft und federt nach – auf den Boden oder
   auf ein Fenster darunter
@@ -63,6 +66,10 @@ Beenden über das Tray-Icon oder `Ctrl+C` im Terminal.
 
 Mit `DESKTOP_SHEEP_DEBUG=1` gibt das Programm bei jeder Änderung die
 erkannten Fenster und begehbaren Kanten auf stderr aus.
+
+Die seltenen Auftritte lassen sich direkt beim Start erzwingen:
+`DESKTOP_SHEEP_ENTRY=bath` (Meteor in die Badewanne) bzw.
+`DESKTOP_SHEEP_ENTRY=visit` (schwarzes Schaf).
 
 ## Tests
 

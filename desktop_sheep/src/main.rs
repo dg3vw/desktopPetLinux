@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::core::anim::SpriteColor;
 use crate::core::geometry::ground_segments;
-use crate::core::sheep::Sheep;
+use crate::core::sheep::{Entry, Sheep};
 use crate::platform::{CurrentPlatform, Platform};
 
 #[derive(Debug)]
@@ -157,6 +157,11 @@ fn run_overlay(n_sheep: usize, color: SpriteColor, windows: bool) {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0xDEAD_BEEF_C0FFEE);
+    // Zum Ausprobieren der seltenen Auftritte: DESKTOP_SHEEP_ENTRY=bath|visit|sky
+    // lässt jedes Schaf beim Start so ins Bild kommen.
+    let debug_entry = std::env::var("DESKTOP_SHEEP_ENTRY")
+        .ok()
+        .and_then(|v| Entry::from_name(&v));
     let mut sheeps = Vec::with_capacity(n_sheep);
     for i in 0..n_sheep {
         let monitor_idx = i % monitors.len();
@@ -164,7 +169,11 @@ fn run_overlay(n_sheep: usize, color: SpriteColor, windows: bool) {
         let x = 40.0 + ((i / monitors.len()) as f32) * 150.0;
         let seed = base_seed
             .wrapping_add((i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
-        sheeps.push(Sheep::new_at(monitor_idx, x, seed));
+        let mut s = Sheep::new_at(monitor_idx, x, seed);
+        if let Some(e) = debug_entry {
+            s.set_entry(e);
+        }
+        sheeps.push(s);
     }
 
     let seg_for_tick = segments.clone();

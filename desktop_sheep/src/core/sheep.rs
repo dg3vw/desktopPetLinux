@@ -26,6 +26,63 @@ const JUMP_VY: f32 = 300.0;
 /// Sackt das Trägerfenster um mehr als so viele Pixel ab, verliert das
 /// Schaf den Halt (kleinere Sprünge werden einfach nachgeführt).
 const DETACH_PX: f32 = 3.0;
+/// Scheitelhöhe des Bocksprungs (Pixel).
+const JUMP_HEIGHT: f32 = 45.0;
+/// Wie hoch das Schaf beim Aussteigen in der Wanne steht (Original offsety).
+const BATH_STAND_PX: f32 = 20.0;
+/// Fluggeschwindigkeit des Bade-Meteors je Achse (Pixel pro Sekunde).
+const BATH_SPEED: f32 = 260.0;
+/// So lange bleibt die Wanne nach dem Aussteigen noch stehen (ms).
+const TUB_LINGER_MS: u32 = 1500;
+/// Ausblendzeit des schwarzen Schafs (ms).
+const FADE_MS: u32 = 500;
+/// Anteile (%) der Auftritte nach dem Rauslaufen: Bade-Meteor, Besuch vom
+/// schwarzen Schaf; der Rest fällt wie gehabt von oben herein.
+const ENTRY_BATH_PERCENT: u32 = 15;
+const ENTRY_VISIT_PERCENT: u32 = 15;
+
+/// Wie ein Schaf (neu) ins Bild kommt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Entry {
+    /// Fällt von oben herein (Original: spawn id 2).
+    Sky,
+    /// Saust als brennender Meteor in eine Badewanne (Original: spawn id 3).
+    Bath,
+    /// Läuft von der Seite herein und trifft ein schwarzes Schaf
+    /// (Original: spawn id 4).
+    Visit,
+}
+
+impl Entry {
+    pub fn from_name(s: &str) -> Option<Self> {
+        Some(match s.to_ascii_lowercase().as_str() {
+            "sky" => Self::Sky,
+            "bath" => Self::Bath,
+            "visit" => Self::Visit,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PropKind {
+    Tub,
+    BlackSheep,
+}
+
+/// Zweites Sprite, das zu einem Schaf gehört (Original: `child`) – die
+/// Badewanne oder das schwarze Schaf. Liegt auf demselben Monitor.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Prop {
+    pub x: f32,
+    pub y: f32,
+    pub frame: u32,
+    /// Sprite horizontal spiegeln.
+    pub mirrored: bool,
+    /// Deckkraft 0..1.
+    pub alpha: f32,
+    kind: PropKind,
+}
 
 pub struct Sheep {
     /// Position in Overlay-lokalen Koordinaten des aktuellen Monitors
@@ -53,6 +110,14 @@ pub struct Sheep {
     land_anim: Option<AnimId>,
     /// Läuft gerade aus dem Bild, um danach von oben neu hereinzufallen.
     leaving: bool,
+    /// Auftritt, der beim ersten Tick mit bekannten Overlay-Maßen startet.
+    pending_entry: Option<Entry>,
+    /// Badewanne bzw. schwarzes Schaf.
+    prop: Option<Prop>,
+    /// Restlebensdauer des Props (ms); `None` = bleibt vorerst.
+    prop_ttl_ms: Option<u32>,
+    /// Treffpunkt beim Besuch des schwarzen Schafs (x, Overlay-lokal).
+    meet_x: f32,
     anim: AnimId,
     frame_idx: usize,
     frame_elapsed_ms: u32,
@@ -78,6 +143,10 @@ impl Sheep {
             hang_offset: 0.0,
             land_anim: None,
             leaving: false,
+            pending_entry: None,
+            prop: None,
+            prop_ttl_ms: None,
+            meet_x: 0.0,
             anim: AnimId::Walk,
             frame_idx: 0,
             frame_elapsed_ms: 0,
@@ -86,6 +155,18 @@ impl Sheep {
         };
         s.drop_in(monitor_idx, x);
         s
+    }
+
+    /// Statt von oben hereinzufallen, den Auftritt `entry` spielen, sobald
+    /// die Overlay-Maße bekannt sind (Start/Debug).
+    pub fn set_entry(&mut self, entry: Entry) {
+        self.pending_entry = Some(entry);
+    }
+
+    /// Badewanne bzw. schwarzes Schaf, falls gerade sichtbar – wird vor
+    /// dem Schaf gezeichnet.
+    pub fn prop(&self) -> Option<&Prop> {
+        self.prop.as_ref()
     }
 
     /// Aktuell zu zeichnender Frame-Index im Sprite-Sheet.
@@ -97,7 +178,7 @@ impl Sheep {
     /// (klassisches Liegen oder Sitzen/Dösen).
     #[allow(dead_code)] // API für spätere UI/Debug-Anzeige
     pub fn is_sleeping(&self) -> bool {
-        matches!(self.anim, AnimId::Sleep | AnimId::Sleep2)
+        matches!(self.anim, AnimId::Sleep | AnimId::Sleep2 | AnimId::Sleep3)
     }
 
     /// Fenster, auf dem das Schaf gerade steht (`None` = Boden oder in der Luft).
@@ -130,6 +211,7 @@ impl Sheep {
         let wake = match self.anim {
             AnimId::Sleep => Some(AnimId::WakeUp),
             AnimId::Sleep2 => Some(AnimId::Sleep2Wake),
+            AnimId::Sleep3 => Some(AnimId::Sleep3Wake),
             _ => None,
         };
         if let Some(next) = wake {
@@ -147,6 +229,9 @@ impl Sheep {
         self.support = None;
         self.hang_offset = 0.0;
         self.leaving = false;
+        self.pending_entry = None;
+        self.prop = None;
+        self.prop_ttl_ms = None;
         self.set_anim(AnimId::Drag);
     }
 
@@ -173,10 +258,21 @@ impl Sheep {
     /// Auf dem Boden: beim Erreichen einer Segmentkante wird geprüft, ob das
     /// Nachbarsegment nahtlos anschließt (X-Kanten in Kontakt, gleiche
     /// Bodenhöhe). Wenn ja, wechselt das Schaf den Monitor, sonst dreht es um
-    /// oder läuft aus dem Bild. Auf einem Fenster: das Schaf wandert mit dem
-    /// Fenster mit, fällt, wenn es verschwindet, und entscheidet an dessen
-    /// Kante zwischen Umdrehen, Runterspringen und Abrutschen.
+    /// oder läuft aus dem Bild. Auf einem Fenster: verschwindet es unter dem
+    /// Schaf, fällt es (nach verdutztem Blick); an der Kante entscheidet es
+    /// zwischen Umdrehen, Runterspringen und Abrutschen.
     pub fn tick(&mut self, dt_ms: u32, segments: &[GroundSegment], world: &World) {
+        if let Some(entry) = self.pending_entry {
+            if world.dims(self.monitor_idx).1 > 0 {
+                self.pending_entry = None;
+                self.start_entry(entry, world);
+            }
+        }
+        self.tick_inner(dt_ms, segments, world);
+        self.update_prop(dt_ms);
+    }
+
+    fn tick_inner(&mut self, dt_ms: u32, segments: &[GroundSegment], world: &World) {
         // Während Drag: nur Zappel-Frames animieren, sonst gar nichts.
         if self.dragged {
             self.advance_frames_loop(dt_ms);
@@ -219,6 +315,14 @@ impl Sheep {
                 self.tick_ceiling(dt_ms, segments, world);
                 return;
             }
+            AnimId::BathFly | AnimId::BathBurn => {
+                self.tick_bath_flight(dt_ms, world);
+                return;
+            }
+            AnimId::VisitRun | AnimId::VisitWalk => {
+                self.tick_visit(dt_ms, world);
+                return;
+            }
             _ => {}
         }
 
@@ -228,7 +332,7 @@ impl Sheep {
         //    das Fenster nach oben geschoben wird, wird es mit angehoben.
         let mut seg = None;
         if let Some(window) = self.support {
-            let feet = self.y + TILE_H as f32 - self.hang_offset;
+            let feet = self.y + TILE_H as f32 - self.hang_offset + self.lift();
             match self.find_support(window, world) {
                 Some(s) if s.y as f32 <= feet + DETACH_PX => seg = Some(s),
                 _ => {
@@ -269,6 +373,161 @@ impl Sheep {
             };
             self.y = (bottom as u32).saturating_sub(TILE_H) as f32;
         }
+        self.y -= self.lift();
+    }
+
+    /// Höhe des Sprites über seiner Standfläche: Sprungbogen beim Jump,
+    /// Aufstehen in der Wanne.
+    fn lift(&self) -> f32 {
+        match self.anim {
+            AnimId::Jump => {
+                let cur = def(self.anim);
+                let total = (cur.frames.len() as u32 * cur.interval_ms) as f32;
+                let t = self.frame_idx as u32 * cur.interval_ms + self.frame_elapsed_ms;
+                let p = (t as f32 / total).clamp(0.0, 1.0);
+                4.0 * JUMP_HEIGHT * p * (1.0 - p)
+            }
+            AnimId::BathOut => BATH_STAND_PX,
+            _ => 0.0,
+        }
+    }
+
+    /// Startet einen Auftritt auf einem zufälligen Monitor. Bad und Besuch
+    /// fallen auf `Sky` zurück, wenn der Monitor zu klein dafür ist.
+    fn start_entry(&mut self, entry: Entry, world: &World) {
+        let n = world.area_dims.len().max(1) as u32;
+        let idx = self.rng.range(n) as usize;
+        let (aw, ah) = world.dims(idx);
+        let floor = (ah - TILE_H as i32).max(0) as f32;
+        let from_right = self.rng.range(2) == 0;
+
+        self.monitor_idx = idx;
+        self.falling = false;
+        self.vx = 0.0;
+        self.vy = 0.0;
+        self.support = None;
+        self.hang_offset = 0.0;
+        self.leaving = false;
+        self.prop = None;
+        self.prop_ttl_ms = None;
+        self.facing = if from_right { Facing::Left } else { Facing::Right };
+
+        match entry {
+            Entry::Bath if (aw - TILE_W as i32).min(ah - TILE_H as i32) >= 240 => {
+                // Wanne am Boden; der Meteor startet knapp außerhalb des
+                // Bildrands und fliegt im 45°-Winkel genau hinein.
+                let d_max = (aw - TILE_W as i32).min(ah - TILE_H as i32) as u32;
+                let d = (200 + self.rng.range(d_max - 200 + 1)) as f32;
+                let x0 = if from_right { aw as f32 } else { -(TILE_W as f32) };
+                let tub_x = x0 + self.forward() * d;
+                self.x = x0;
+                self.y = floor - d;
+                self.prop = Some(Prop {
+                    x: tub_x,
+                    y: floor,
+                    frame: 146,
+                    mirrored: false,
+                    alpha: 1.0,
+                    kind: PropKind::Tub,
+                });
+                self.set_anim(AnimId::BathFly);
+            }
+            Entry::Visit if aw >= 4 * TILE_W as i32 => {
+                // Treffpunkt um die Bildschirmmitte, das schwarze Schaf
+                // kommt spiegelbildlich von der anderen Seite.
+                let jitter = self.rng.range((aw / 3).max(1) as u32) as f32 - aw as f32 / 6.0;
+                self.meet_x = aw as f32 / 2.0 + jitter;
+                self.x = if from_right { aw as f32 } else { -(TILE_W as f32) };
+                self.y = floor;
+                self.prop = Some(Prop {
+                    x: 0.0,
+                    y: floor,
+                    frame: 155,
+                    mirrored: !from_right,
+                    alpha: 1.0,
+                    kind: PropKind::BlackSheep,
+                });
+                self.set_anim(AnimId::VisitRun);
+            }
+            _ => {
+                let x = self.rng.range((aw - TILE_W as i32).max(1) as u32) as f32;
+                self.drop_in(idx, x);
+            }
+        }
+    }
+
+    /// Meteor-Flug: diagonal nach unten, bis die Wanne erreicht ist.
+    fn tick_bath_flight(&mut self, dt_ms: u32, world: &World) {
+        let (_, ah) = world.dims(self.monitor_idx);
+        let floor = (ah - TILE_H as i32).max(0) as f32;
+        let step = BATH_SPEED * dt_ms as f32 / 1000.0;
+        self.x += self.forward() * step;
+        self.y += step;
+        if self.y >= floor {
+            self.y = floor;
+            if let Some(tub) = self.prop {
+                self.x = tub.x;
+            }
+            self.set_anim(AnimId::BathSoak);
+        }
+    }
+
+    /// Besuch: auf den Treffpunkt zulaufen, die letzten Meter gehen,
+    /// dann erröten. Das schwarze Schaf spiegelt die Bewegung (update_prop).
+    fn tick_visit(&mut self, dt_ms: u32, world: &World) {
+        let (_, ah) = world.dims(self.monitor_idx);
+        self.y = (ah - TILE_H as i32).max(0) as f32;
+        let target = if self.facing == Facing::Left {
+            self.meet_x
+        } else {
+            self.meet_x - TILE_W as f32
+        };
+        let dx = def(self.anim).dx_per_tick as f32 * (dt_ms as f32 / 16.0);
+        self.x += self.forward() * dx;
+        let remaining = (target - self.x) * self.forward();
+        if remaining <= 0.0 {
+            self.x = target;
+            self.set_anim(AnimId::VisitBlush);
+        } else if self.anim == AnimId::VisitRun && remaining <= 2.5 * TILE_W as f32 {
+            self.set_anim(AnimId::VisitWalk);
+        }
+    }
+
+    /// Prop an den Zustand des Schafs anpassen und ggf. ablaufen lassen.
+    fn update_prop(&mut self, dt_ms: u32) {
+        if let Some(ttl) = self.prop_ttl_ms {
+            let left = ttl.saturating_sub(dt_ms);
+            if left == 0 {
+                self.prop = None;
+                self.prop_ttl_ms = None;
+                return;
+            }
+            self.prop_ttl_ms = Some(left);
+        }
+        let anim = self.anim;
+        let idx = self.frame_idx;
+        let ttl = self.prop_ttl_ms;
+        let white_x = self.x;
+        let meet = self.meet_x;
+        let Some(p) = self.prop.as_mut() else { return };
+        match p.kind {
+            PropKind::Tub => {
+                p.frame = if anim == AnimId::BathSoak { 147 + (idx % 2) as u32 } else { 146 };
+            }
+            PropKind::BlackSheep => {
+                p.frame = match anim {
+                    AnimId::VisitRun => [155, 154, 154][idx % 3],
+                    AnimId::VisitWalk => [156, 157][idx % 2],
+                    _ => 157,
+                };
+                // Spiegelbildlich zum weißen Schaf, bis es nach dem Erröten
+                // weiterläuft – dann bleibt das schwarze stehen und verblasst.
+                if matches!(anim, AnimId::VisitRun | AnimId::VisitWalk | AnimId::VisitBlush) {
+                    p.x = 2.0 * meet - TILE_W as f32 - white_x;
+                }
+                p.alpha = ttl.map_or(1.0, |t| (t as f32 / FADE_MS as f32).min(1.0));
+            }
+        }
     }
 
     fn forward(&self) -> f32 {
@@ -302,6 +561,14 @@ impl Sheep {
             }
             AnimId::FallWinC => self.start_fall(Some(AnimId::FallWinD)),
             AnimId::Fall | AnimId::FallPanic => self.start_fall(None),
+            AnimId::BathOut => {
+                let out = def(AnimId::BathOut);
+                self.prop_ttl_ms = Some(out.frames.len() as u32 * out.interval_ms + TUB_LINGER_MS);
+            }
+            AnimId::VisitBlush => {
+                let blush = def(AnimId::VisitBlush);
+                self.prop_ttl_ms = Some(blush.frames.len() as u32 * blush.interval_ms + FADE_MS);
+            }
             _ => {}
         }
     }
@@ -410,7 +677,7 @@ impl Sheep {
         let (aw, _) = world.dims(self.monitor_idx);
         if self.leaving {
             if self.x <= -(TILE_W as f32) || self.x >= aw as f32 {
-                self.respawn_from_sky(world);
+                self.respawn(world);
             }
             return;
         }
@@ -509,14 +776,18 @@ impl Sheep {
         self.set_anim(if ram { AnimId::WallRam } else { AnimId::Rotate1A });
     }
 
-    /// Neu von oben ins Bild fallen – zufälliger Monitor, zufällige Stelle.
-    fn respawn_from_sky(&mut self, world: &World) {
-        let n = world.area_dims.len().max(1) as u32;
-        let idx = self.rng.range(n) as usize;
-        let (aw, _) = world.dims(idx);
-        let x = self.rng.range((aw - TILE_W as i32).max(1) as u32) as f32;
-        self.facing = if self.rng.range(2) == 0 { Facing::Left } else { Facing::Right };
-        self.drop_in(idx, x);
+    /// Nach dem Rauslaufen neu auftreten: meist von oben, gelegentlich als
+    /// Bade-Meteor oder mit Besuch vom schwarzen Schaf.
+    fn respawn(&mut self, world: &World) {
+        let r = self.rng.range(100);
+        let entry = if r < ENTRY_BATH_PERCENT {
+            Entry::Bath
+        } else if r < ENTRY_BATH_PERCENT + ENTRY_VISIT_PERCENT {
+            Entry::Visit
+        } else {
+            Entry::Sky
+        };
+        self.start_entry(entry, world);
     }
 
     /// Setzt das Schaf knapp oberhalb des Overlays und lässt es fallen.
@@ -604,7 +875,7 @@ impl Sheep {
         }
 
         // Endgültig gelandet. Ohne vorgegebene Landeanimation zufällig
-        // FallHard oder das elastischere Boing, damit Landungen
+        // FallHard, das elastischere Boing oder FallSoft, damit Landungen
         // abwechslungsreich aussehen.
         self.falling = false;
         self.vx = 0.0;
@@ -612,8 +883,7 @@ impl Sheep {
         self.support = seg.map(|s| s.window);
         let next = match self.land_anim.take() {
             Some(a) => a,
-            None if self.rng.range(2) == 0 => AnimId::FallHard,
-            None => AnimId::Boing,
+            None => [AnimId::FallHard, AnimId::Boing, AnimId::FallSoft][self.rng.range(3) as usize],
         };
         self.set_anim(next);
     }
@@ -866,6 +1136,104 @@ mod tests {
             }
         }
         panic!("kein Schaf hat an der Decke losgelassen");
+    }
+
+    fn on_floor(seed: u64) -> Sheep {
+        let none: Vec<Vec<Surface>> = vec![vec![]];
+        let world = World { area_dims: &DIMS, surfaces: &none };
+        let mut s = Sheep::new_at(0, 800.0, seed);
+        tick_until_landed(&mut s, &world, 16);
+        s
+    }
+
+    #[test]
+    fn jump_arcs_and_lands_in_sprint() {
+        let none: Vec<Vec<Surface>> = vec![vec![]];
+        let world = World { area_dims: &DIMS, surfaces: &none };
+        let mut s = on_floor(11);
+        s.facing = Facing::Right;
+        s.x = 200.0;
+        s.set_anim(AnimId::Jump);
+        let floor = 1080.0 - TILE_H as f32;
+        let mut peak = 0.0f32;
+        while s.anim == AnimId::Jump {
+            s.tick(16, &SEGS, &world);
+            peak = peak.max(floor - s.y);
+        }
+        assert!(peak > JUMP_HEIGHT * 0.9, "Scheitel {peak}");
+        assert_eq!(s.anim, AnimId::Run);
+        assert_eq!(s.y, floor);
+        assert!(s.x > 300.0);
+    }
+
+    #[test]
+    fn sleep3_wakes_on_mouse() {
+        let none: Vec<Vec<Surface>> = vec![vec![]];
+        let world = World { area_dims: &DIMS, surfaces: &none };
+        let mut s = on_floor(12);
+        s.set_anim(AnimId::Sleep3Yawn);
+        for _ in 0..200 {
+            s.tick(16, &SEGS, &world);
+        }
+        assert!(s.is_sleeping());
+        s.wake_from_sleep();
+        assert_eq!(s.anim, AnimId::Sleep3Wake);
+    }
+
+    #[test]
+    fn bath_meteor_lands_in_tub_and_tub_disappears() {
+        let none: Vec<Vec<Surface>> = vec![vec![]];
+        let world = World { area_dims: &DIMS, surfaces: &none };
+        let mut s = Sheep::new_at(0, 800.0, 21);
+        s.set_entry(Entry::Bath);
+        s.tick(16, &SEGS, &world);
+        assert_eq!(s.anim, AnimId::BathFly);
+        let tub = *s.prop().expect("Wanne fehlt");
+        assert_eq!(tub.y, 1080.0 - TILE_H as f32);
+        let mut steps = 0;
+        while s.anim != AnimId::BathSoak {
+            s.tick(16, &SEGS, &world);
+            steps += 1;
+            assert!(steps < 2000, "Meteor kommt nicht an");
+        }
+        assert_eq!((s.x, s.y), (tub.x, tub.y));
+        assert!(matches!(s.prop().unwrap().frame, 147 | 148));
+        while s.prop().is_some() {
+            s.tick(16, &SEGS, &world);
+            steps += 1;
+            assert!(steps < 5000, "Wanne verschwindet nicht");
+        }
+        assert!(matches!(s.anim, AnimId::Walk | AnimId::Rotate1B));
+    }
+
+    #[test]
+    fn black_sheep_visit_meets_in_the_middle_and_fades() {
+        let none: Vec<Vec<Surface>> = vec![vec![]];
+        let world = World { area_dims: &DIMS, surfaces: &none };
+        for seed in [31, 32] {
+            let mut s = Sheep::new_at(0, 800.0, seed);
+            s.set_entry(Entry::Visit);
+            s.tick(16, &SEGS, &world);
+            let mut steps = 0;
+            while s.anim != AnimId::VisitBlush {
+                s.tick(16, &SEGS, &world);
+                steps += 1;
+                assert!(steps < 2000, "Treffpunkt nicht erreicht");
+            }
+            let black = *s.prop().expect("schwarzes Schaf fehlt");
+            // Direkt nebeneinander, einander zugewandt.
+            assert_eq!((black.x - s.x).abs(), TILE_W as f32);
+            assert_eq!(black.x < s.x, s.facing == Facing::Left);
+            assert_eq!(black.mirrored, s.facing == Facing::Right);
+            let mut faded = false;
+            while let Some(p) = s.prop() {
+                faded |= p.alpha < 1.0;
+                s.tick(16, &SEGS, &world);
+                steps += 1;
+                assert!(steps < 5000, "schwarzes Schaf verschwindet nicht");
+            }
+            assert!(faded);
+        }
     }
 
     #[test]
