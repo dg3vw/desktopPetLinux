@@ -18,7 +18,11 @@ const LEAVE_PERCENT: u32 = 20;
 /// Wahrscheinlichkeit (%) an einer äußeren Bildschirmkante die Wand
 /// hochzuklettern (zusätzlich zu LEAVE_PERCENT).
 const CLIMB_PERCENT: u32 = 30;
-/// Klettergeschwindigkeit an der Wand (Pixel pro 16-ms-Tick).
+/// Globaler Faktor auf alle Lauf- und Klettergeschwindigkeiten
+/// (`dx_per_tick` der Animationen, Wand). Physik (Fallen, Sprünge vom
+/// Fenster, Meteor) bleibt davon unberührt.
+const SPEED_SCALE: f32 = 0.5;
+/// Klettergeschwindigkeit an der Wand (Pixel pro 16-ms-Tick, vor SPEED_SCALE).
 const CLIMB_PX_PER_TICK: f32 = 1.5;
 /// Absprung beim jump_down: horizontal / nach oben (Pixel pro Sekunde).
 const JUMP_VX: f32 = 150.0;
@@ -345,7 +349,7 @@ impl Sheep {
         // 3) Bewegung (nur wenn dx_per_tick > 0: Walk/Run)
         let cur = def(self.anim);
         if cur.dx_per_tick > 0 {
-            let dx = cur.dx_per_tick as f32 * self.forward() * (dt_ms as f32 / 16.0);
+            let dx = self.step_px(dt_ms) * self.forward();
             self.x += dx;
             match seg {
                 Some(s) => self.check_window_edge(&s),
@@ -482,7 +486,7 @@ impl Sheep {
         } else {
             self.meet_x - TILE_W as f32
         };
-        let dx = def(self.anim).dx_per_tick as f32 * (dt_ms as f32 / 16.0);
+        let dx = self.step_px(dt_ms);
         self.x += self.forward() * dx;
         let remaining = (target - self.x) * self.forward();
         if remaining <= 0.0 {
@@ -528,6 +532,11 @@ impl Sheep {
                 p.alpha = ttl.map_or(1.0, |t| (t as f32 / FADE_MS as f32).min(1.0));
             }
         }
+    }
+
+    /// Laufstrecke der aktuellen Animation in `dt_ms` (ohne Richtung).
+    fn step_px(&self, dt_ms: u32) -> f32 {
+        def(self.anim).dx_per_tick as f32 * SPEED_SCALE * (dt_ms as f32 / 16.0)
     }
 
     fn forward(&self) -> f32 {
@@ -715,7 +724,7 @@ impl Sheep {
         let wall_left = (self.facing == Facing::Left) == up;
         self.x = if wall_left { 0.0 } else { (aw - TILE_W as i32).max(0) as f32 };
         let floor = (ah - TILE_H as i32).max(0) as f32;
-        let dy = CLIMB_PX_PER_TICK * (dt_ms as f32 / 16.0);
+        let dy = CLIMB_PX_PER_TICK * SPEED_SCALE * (dt_ms as f32 / 16.0);
         match self.anim {
             AnimId::ClimbStart => self.y = floor,
             AnimId::ClimbUp => {
@@ -743,7 +752,7 @@ impl Sheep {
             return; // Um die Ecke greifen – auf der Stelle.
         }
         let (aw, _) = world.dims(self.monitor_idx);
-        let dx = def(self.anim).dx_per_tick as f32 * self.forward() * (dt_ms as f32 / 16.0);
+        let dx = self.step_px(dt_ms) * self.forward();
         self.x += dx;
         let max_x = (aw - TILE_W as i32).max(0) as f32;
         let dir = if self.x <= 0.0 {
