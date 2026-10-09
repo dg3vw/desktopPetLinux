@@ -18,9 +18,12 @@ use crate::core::world::World;
 use crate::platform::x11_windows;
 use crate::platform::Platform;
 
-/// Wie oft die Fensterliste neu gelesen wird. Pro Abfrage ein paar X11-
-/// Roundtrips je Fenster – deutlich seltener als der Animations-Tick.
-const WINDOW_POLL_MS: u64 = 250;
+/// Takt des Fenster-Pollers. Abgefragt wird nur jeden
+/// `WINDOW_POLL_IDLE_EVERY`-ten Takt (pro Abfrage ein paar X11-Roundtrips je
+/// Fenster), außer die letzte Abfrage hat eine Änderung gefunden – dann
+/// sofort wieder, damit ein Schaf einem gezogenen Fenster flüssig folgt.
+const WINDOW_POLL_MS: u64 = 50;
+const WINDOW_POLL_IDLE_EVERY: u32 = 5;
 
 struct OverlayHandle {
     area: gtk4::glib::WeakRef<DrawingArea>,
@@ -425,8 +428,14 @@ fn start_window_poller(
     let debug = std::env::var_os("DESKTOP_SHEEP_DEBUG").is_some();
     let atoms = unsafe { x11_windows::Atoms::new(x11display.xdisplay()) };
     let mut last_debug = String::new();
+    let mut ticks: u32 = 0;
+    let mut changing = true;
 
     glib::timeout_add_local(std::time::Duration::from_millis(WINDOW_POLL_MS), move || {
+        ticks = ticks.wrapping_add(1);
+        if !changing && ticks % WINDOW_POLL_IDLE_EVERY != 0 {
+            return glib::ControlFlow::Continue;
+        }
         let xdisp = unsafe { x11display.xdisplay() };
         x11display.error_trap_push();
         let windows = unsafe { x11_windows::list_windows(xdisp, &atoms) };
@@ -477,7 +486,10 @@ fn start_window_poller(
                 last_debug = out;
             }
         }
-        *surfaces.borrow_mut() = new_surfaces;
+        changing = *surfaces.borrow() != new_surfaces;
+        if changing {
+            *surfaces.borrow_mut() = new_surfaces;
+        }
         glib::ControlFlow::Continue
     });
 }

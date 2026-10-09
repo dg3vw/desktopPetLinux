@@ -31,6 +31,22 @@ pub struct Surface {
     /// Linke Fensterkante (ungeclippt). Ändert sich nur, wenn das Fenster
     /// verschoben wird – daran erkennt das Schaf horizontale Mitnahme.
     pub win_x: i32,
+    /// Rechte Fensterkante (ungeclippt). Endet `x_start`/`x_end` nicht an
+    /// `win_x`/`win_right`, ist dort eine Wand (Verdeckung, Monitorrand)
+    /// statt eines Abgrunds.
+    pub win_right: i32,
+}
+
+impl Surface {
+    /// Ist das linke Ende eine echte Fensterkante (Abgrund)?
+    pub fn left_is_drop(&self) -> bool {
+        self.x_start == self.win_x
+    }
+
+    /// Ist das rechte Ende eine echte Fensterkante (Abgrund)?
+    pub fn right_is_drop(&self) -> bool {
+        self.x_end == self.win_right
+    }
 }
 
 /// Abstand zur Overlay-Unterkante, unterhalb dessen eine Fensterkante nicht
@@ -78,6 +94,7 @@ pub fn walkable_surfaces(windows: &[WindowRect], overlays: &[Rect]) -> Vec<Vec<S
                     x_end: b - o.x,
                     y: local_y,
                     win_x: w.rect.x - o.x,
+                    win_right: w.rect.right() - o.x,
                 });
             }
         }
@@ -123,7 +140,7 @@ mod tests {
         let s = walkable_surfaces(&[win(1, 100, 300, 800, 400)], &[MON]);
         assert_eq!(
             s[0],
-            vec![Surface { window: 1, x_start: 100, x_end: 900, y: 300, win_x: 100 }]
+            vec![Surface { window: 1, x_start: 100, x_end: 900, y: 300, win_x: 100, win_right: 900 }]
         );
     }
 
@@ -195,12 +212,29 @@ mod tests {
         let s = walkable_surfaces(&[win(7, 1500, 400, 1000, 300)], &[MON, right]);
         assert_eq!(
             s[0],
-            vec![Surface { window: 7, x_start: 1500, x_end: 1920, y: 400, win_x: 1500 }]
+            vec![Surface { window: 7, x_start: 1500, x_end: 1920, y: 400, win_x: 1500, win_right: 2500 }]
         );
         assert_eq!(
             s[1],
-            vec![Surface { window: 7, x_start: 0, x_end: 580, y: 400, win_x: -420 }]
+            vec![Surface { window: 7, x_start: 0, x_end: 580, y: 400, win_x: -420, win_right: 580 }]
         );
+    }
+
+    #[test]
+    fn occluded_and_clipped_ends_are_walls() {
+        let right = Rect { x: 1920, y: 0, width: 1280, height: 1024 };
+        let s = walkable_surfaces(
+            &[win(1, 100, 300, 800, 400), win(2, 400, 200, 200, 300), win(3, 1800, 500, 400, 100)],
+            &[MON, right],
+        );
+        let e = |o: usize, w: WindowId, x: i32| *s[o].iter().find(|e| e.window == w && e.x_start == x).unwrap();
+        // Fenster 1, links von Fenster 2: links Abgrund, rechts Wand.
+        assert!(e(0, 1, 100).left_is_drop() && !e(0, 1, 100).right_is_drop());
+        // Fenster 1, rechts von Fenster 2: links Wand, rechts Abgrund.
+        assert!(!e(0, 1, 600).left_is_drop() && e(0, 1, 600).right_is_drop());
+        // Fenster 3 über die Monitorgrenze: am Clip jeweils Wand.
+        assert!(e(0, 3, 1800).left_is_drop() && !e(0, 3, 1800).right_is_drop());
+        assert!(!e(1, 3, 0).left_is_drop() && e(1, 3, 0).right_is_drop());
     }
 
     #[test]

@@ -231,7 +231,7 @@ impl Sheep {
             let dx = cur.dx_per_tick as f32 * self.forward() * (dt_ms as f32 / 16.0);
             self.x += dx;
             match seg {
-                Some(s) => self.check_window_edge(&s, world),
+                Some(s) => self.check_window_edge(&s),
                 None => {
                     self.check_floor_edge(segments, world);
                     if self.falling {
@@ -350,33 +350,33 @@ impl Sheep {
     }
 
     /// Am Ende einer Fensterkante: stehen bleiben und reagieren.
-    fn check_window_edge(&mut self, seg: &Surface, world: &World) {
+    fn check_window_edge(&mut self, seg: &Surface) {
         let half = TILE_W as f32 / 2.0;
         let cx = self.x + half;
-        let (aw, _) = world.dims(self.monitor_idx);
-        let clipped = match self.facing {
+        let drop = match self.facing {
             Facing::Right if cx >= seg.x_end as f32 - EDGE_MARGIN => {
                 self.x = seg.x_end as f32 - EDGE_MARGIN - half;
-                seg.x_end >= aw
+                seg.right_is_drop()
             }
             Facing::Left if cx <= seg.x_start as f32 + EDGE_MARGIN => {
                 self.x = seg.x_start as f32 + EDGE_MARGIN - half;
-                seg.x_start <= 0
+                seg.left_is_drop()
             }
             _ => return,
         };
-        // Endet die Kante nur, weil der Monitor endet, geht es dahinter
-        // eigentlich weiter – dort nicht springen, sondern umdrehen.
-        let next = if clipped {
-            AnimId::Rotate1A
-        } else {
-            match self.anim {
-                AnimId::Run | AnimId::RunBegin | AnimId::RunEnd => {
-                    if self.rng.range(2) == 0 { AnimId::JumpDown } else { AnimId::Rotate1A }
-                }
-                _ => {
-                    if self.rng.range(100) < 60 { AnimId::LookDown } else { AnimId::Rotate1A }
-                }
+        // Endet die Kante, weil ein höheres Fenster sie verdeckt oder der
+        // Monitor endet, steht dort eine Wand – umdrehen bzw. dagegenrennen
+        // wie am Bildschirmrand, nicht runterspringen.
+        if !drop {
+            self.begin_turn();
+            return;
+        }
+        let next = match self.anim {
+            AnimId::Run | AnimId::RunBegin | AnimId::RunEnd => {
+                if self.rng.range(2) == 0 { AnimId::JumpDown } else { AnimId::Rotate1A }
+            }
+            _ => {
+                if self.rng.range(100) < 60 { AnimId::LookDown } else { AnimId::Rotate1A }
             }
         };
         self.set_anim(next);
@@ -591,7 +591,7 @@ mod tests {
     const SEGS: [GroundSegment; 1] = [GroundSegment { x_start: 0, x_end: 1920, y: 1080 }];
 
     fn surface(window: WindowId, x_start: i32, x_end: i32, y: i32) -> Surface {
-        Surface { window, x_start, x_end, y, win_x: x_start }
+        Surface { window, x_start, x_end, y, win_x: x_start, win_right: x_end }
     }
 
     /// Tickt, bis das Schaf nicht mehr fällt (max. 10 s Simulationszeit).
@@ -645,7 +645,7 @@ mod tests {
 
         // Fenster um (+50, +20) verschoben. Landeanimationen haben dx=0,
         // die Verschiebung kommt also allein vom Mitwandern.
-        let moved = vec![vec![Surface { window: 1, x_start: 150, x_end: 950, y: 320, win_x: 150 }]];
+        let moved = vec![vec![Surface { window: 1, x_start: 150, x_end: 950, y: 320, win_x: 150, win_right: 950 }]];
         s.tick(16, &SEGS, &World { area_dims: &DIMS, surfaces: &moved });
         assert_eq!(s.x, x0 + 50.0);
         assert_eq!(s.y + TILE_H as f32, 320.0);
@@ -656,6 +656,31 @@ mod tests {
         s.tick(16, &SEGS, &World { area_dims: &DIMS, surfaces: &empty });
         assert!(s.falling);
         assert_eq!(s.support_window(), None);
+    }
+
+    #[test]
+    fn never_jumps_off_at_walls() {
+        // Kante an beiden Enden verdeckt (Fenster reicht weiter): das Schaf
+        // darf hier nur umdrehen/dagegenrennen, nie runterspringen.
+        let surfaces = vec![vec![Surface {
+            window: 1,
+            x_start: 300,
+            x_end: 500,
+            y: 400,
+            win_x: 100,
+            win_right: 900,
+        }]];
+        let world = World { area_dims: &DIMS, surfaces: &surfaces };
+        let mut s = Sheep::new_at(0, 380.0, 5);
+        tick_until_landed(&mut s, &world, 16);
+        for _ in 0..(300_000 / 16) {
+            s.tick(16, &SEGS, &world);
+            assert_eq!(s.support_window(), Some(1));
+            assert!(!matches!(
+                s.anim,
+                AnimId::LookDown | AnimId::JumpDown | AnimId::FallWinA
+            ));
+        }
     }
 
     #[test]
