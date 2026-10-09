@@ -80,7 +80,13 @@ fn autostart_path() -> Option<std::path::PathBuf> {
 }
 
 fn install_autostart() -> std::io::Result<()> {
-    let exe = std::env::current_exe()?;
+    // Aus einem AppImage heraus zeigt current_exe() in den temporären Mount
+    // (/tmp/.mount_*), der nach dem Beenden verschwindet – dann den Pfad der
+    // AppImage-Datei selbst eintragen (setzt die AppImage-Runtime in $APPIMAGE).
+    let exe = match std::env::var_os("APPIMAGE") {
+        Some(p) => std::path::PathBuf::from(p),
+        None => std::env::current_exe()?,
+    };
     let path = autostart_path().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound, "HOME nicht gesetzt")
     })?;
@@ -92,7 +98,7 @@ fn install_autostart() -> std::io::Result<()> {
          Type=Application\n\
          Name=Desktop Sheep\n\
          Comment=Ein Schaf läuft an der Bildschirmunterkante\n\
-         Exec={} --sheep 1\n\
+         Exec=\"{}\" --sheep 1\n\
          Terminal=false\n\
          X-GNOME-Autostart-enabled=true\n",
         exe.display()
