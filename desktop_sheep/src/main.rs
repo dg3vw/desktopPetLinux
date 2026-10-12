@@ -1,18 +1,22 @@
 mod core;
+mod desktop_files;
 mod platform;
+mod settings;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::core::anim::SpriteColor;
 use crate::core::geometry::ground_segments;
 use crate::core::sheep::{Entry, Sheep};
+use crate::desktop_files::DesktopFile;
 use crate::platform::{CurrentPlatform, Platform};
+use crate::settings::Settings;
 
 #[derive(Debug)]
 enum Command {
-    Run { n_sheep: usize, color: SpriteColor, windows: bool },
-    InstallAutostart,
-    RemoveAutostart,
+    Run(Settings),
+    Install(DesktopFile),
+    Remove(DesktopFile),
     Help,
 }
 
@@ -25,29 +29,33 @@ fn print_help() {
            {bin} [OPTIONEN]               starten\n  \
            {bin} --install-autostart      .desktop-Datei in ~/.config/autostart/ anlegen\n  \
            {bin} --remove-autostart       .desktop-Datei entfernen\n  \
+           {bin} --install-menu           Eintrag im Startmenü anlegen (~/.local/share/applications/)\n  \
+           {bin} --remove-menu            Startmenü-Eintrag entfernen\n  \
            {bin} --help                   diese Hilfe\n\
          \n\
-         Optionen:\n  \
+         Optionen (überschreiben die im Tray-Menü gespeicherten Einstellungen):\n  \
            --sheep N        Anzahl Schafe (Standard: 1)\n  \
            --color FARBE    default | blue | green | orange | pink | purple | red | yellow\n  \
-           --no-windows     nur am Boden laufen, nicht auf Fensteroberkanten\n"
+           --no-windows     nur am Boden laufen, nicht auf Fensteroberkanten\n  \
+           --windows        auch auf Fensteroberkanten laufen (Standard)\n"
     );
 }
 
 fn parse_args() -> Command {
-    let mut n_sheep: usize = 1;
-    let mut color: SpriteColor = SpriteColor::Default;
-    let mut windows = true;
+    let mut settings = Settings::load();
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
             "--help" | "-h" => return Command::Help,
-            "--install-autostart" => return Command::InstallAutostart,
-            "--remove-autostart" => return Command::RemoveAutostart,
-            "--no-windows" => windows = false,
+            "--install-autostart" => return Command::Install(DesktopFile::Autostart),
+            "--remove-autostart" => return Command::Remove(DesktopFile::Autostart),
+            "--install-menu" => return Command::Install(DesktopFile::StartMenu),
+            "--remove-menu" => return Command::Remove(DesktopFile::StartMenu),
+            "--no-windows" => settings.walk_on_windows = false,
+            "--windows" => settings.walk_on_windows = true,
             "--sheep" => {
                 if let Some(v) = it.next() {
-                    n_sheep = v.parse().unwrap_or(1).max(1);
+                    settings.n_sheep = v.parse().unwrap_or(1).max(1);
                 }
             }
             "--color" => {
@@ -56,7 +64,7 @@ fn parse_args() -> Command {
                     return Command::Help;
                 };
                 match SpriteColor::from_name(&v) {
-                    Some(c) => color = c,
+                    Some(c) => settings.color = c,
                     None => {
                         eprintln!("Unbekannte Farbe: {v}");
                         return Command::Help;
@@ -69,88 +77,33 @@ fn parse_args() -> Command {
             }
         }
     }
-    Command::Run { n_sheep, color, windows }
-}
-
-fn autostart_path() -> Option<std::path::PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    let mut p = std::path::PathBuf::from(home);
-    p.push(".config/autostart/desktop-sheep.desktop");
-    Some(p)
-}
-
-fn install_autostart() -> std::io::Result<()> {
-    // Aus einem AppImage heraus zeigt current_exe() in den temporären Mount
-    // (/tmp/.mount_*), der nach dem Beenden verschwindet – dann den Pfad der
-    // AppImage-Datei selbst eintragen (setzt die AppImage-Runtime in $APPIMAGE).
-    let exe = match std::env::var_os("APPIMAGE") {
-        Some(p) => std::path::PathBuf::from(p),
-        None => std::env::current_exe()?,
-    };
-    let path = autostart_path().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::NotFound, "HOME nicht gesetzt")
-    })?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let content = format!(
-        "[Desktop Entry]\n\
-         Type=Application\n\
-         Name=Desktop Sheep\n\
-         Comment=Ein Schaf läuft an der Bildschirmunterkante\n\
-         Exec=\"{}\" --sheep 1\n\
-         Terminal=false\n\
-         X-GNOME-Autostart-enabled=true\n",
-        exe.display()
-    );
-    std::fs::write(&path, content)?;
-    println!("Autostart eingerichtet: {}", path.display());
-    Ok(())
-}
-
-fn remove_autostart() -> std::io::Result<()> {
-    let path = autostart_path().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::NotFound, "HOME nicht gesetzt")
-    })?;
-    match std::fs::remove_file(&path) {
-        Ok(_) => {
-            println!("Autostart entfernt: {}", path.display());
-            Ok(())
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            println!("Kein Autostart-Eintrag vorhanden ({}).", path.display());
-            Ok(())
-        }
-        Err(e) => Err(e),
-    }
+    Command::Run(settings)
 }
 
 fn main() {
     match parse_args() {
-        Command::Help => {
-            print_help();
-            return;
-        }
-        Command::InstallAutostart => {
-            if let Err(e) = install_autostart() {
-                eprintln!("Autostart-Installation fehlgeschlagen: {e}");
+        Command::Help => print_help(),
+        Command::Install(f) => match f.install() {
+            Ok(path) => println!("Eingerichtet: {}", path.display()),
+            Err(e) => {
+                eprintln!("Einrichten fehlgeschlagen: {e}");
                 std::process::exit(1);
             }
-            return;
-        }
-        Command::RemoveAutostart => {
-            if let Err(e) = remove_autostart() {
-                eprintln!("Autostart-Entfernen fehlgeschlagen: {e}");
+        },
+        Command::Remove(f) => match f.remove() {
+            Ok(true) => println!("Eintrag entfernt."),
+            Ok(false) => println!("Kein Eintrag vorhanden."),
+            Err(e) => {
+                eprintln!("Entfernen fehlgeschlagen: {e}");
                 std::process::exit(1);
             }
-            return;
-        }
-        Command::Run { n_sheep, color, windows } => run_overlay(n_sheep, color, windows),
+        },
+        Command::Run(settings) => run_overlay(settings),
     }
 }
 
-fn run_overlay(n_sheep: usize, color: SpriteColor, windows: bool) {
-    let platform = CurrentPlatform::new(color, windows);
+fn run_overlay(settings: Settings) {
+    let platform = CurrentPlatform::new(settings);
     let monitors = platform.monitor_geometry();
     if monitors.is_empty() {
         eprintln!("Keine Monitore gefunden – bricht ab.");
@@ -158,32 +111,41 @@ fn run_overlay(n_sheep: usize, color: SpriteColor, windows: bool) {
     }
     let segments = ground_segments(&monitors);
 
-    // N Schafe rundum auf die Monitore verteilen, jedes mit eigenem Seed.
+    // Schaf Nr. i: rundum auf die Monitore verteilt, jedes mit eigenem Seed.
+    // Der Zähler sorgt dafür, dass ein im Menü neu hinzugefügtes Schaf nicht
+    // denselben Seed wie ein zuvor entferntes bekommt.
+    let n_monitors = monitors.len();
     let base_seed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0xDEAD_BEEF_C0FFEE);
+    let mut spawned: u64 = 0;
+    let mut spawn = move |i: usize| {
+        let monitor_idx = i % n_monitors;
+        // Startpositionen ~150 px voneinander, damit sie sich nicht sofort überlappen.
+        let x = 40.0 + ((i / n_monitors) as f32) * 150.0;
+        let seed = base_seed.wrapping_add(spawned.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        spawned += 1;
+        Sheep::new_at(monitor_idx, x, seed)
+    };
+
     // Zum Ausprobieren der seltenen Auftritte: DESKTOP_SHEEP_ENTRY=bath|visit|sky
     // lässt jedes Schaf beim Start so ins Bild kommen.
     let debug_entry = std::env::var("DESKTOP_SHEEP_ENTRY")
         .ok()
         .and_then(|v| Entry::from_name(&v));
-    let mut sheeps = Vec::with_capacity(n_sheep);
-    for i in 0..n_sheep {
-        let monitor_idx = i % monitors.len();
-        // Startpositionen ~150 px voneinander, damit sie sich nicht sofort überlappen.
-        let x = 40.0 + ((i / monitors.len()) as f32) * 150.0;
-        let seed = base_seed
-            .wrapping_add((i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
-        let mut s = Sheep::new_at(monitor_idx, x, seed);
-        if let Some(e) = debug_entry {
-            s.set_entry(e);
-        }
-        sheeps.push(s);
-    }
+    let sheeps: Vec<Sheep> = (0..settings.n_sheep)
+        .map(|i| {
+            let mut s = spawn(i);
+            if let Some(e) = debug_entry {
+                s.set_entry(e);
+            }
+            s
+        })
+        .collect();
 
     let seg_for_tick = segments.clone();
-    if let Err(e) = platform.run(sheeps, 16, move |all, dt, world| {
+    if let Err(e) = platform.run(sheeps, spawn, 16, move |all, dt, world| {
         for s in all.iter_mut() {
             s.tick(dt, &seg_for_tick, world);
         }

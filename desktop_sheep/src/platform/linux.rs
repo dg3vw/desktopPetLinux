@@ -1,7 +1,6 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::mpsc;
 use std::time::Instant;
 
 use cairo::ImageSurface;
@@ -10,13 +9,15 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{Application, ApplicationWindow, DrawingArea};
 
-use crate::core::anim::{TILE_H, TILE_W, frame_to_tile};
+use crate::core::anim::{SpriteColor, TILE_H, TILE_W, frame_to_tile};
 use crate::core::geometry::Rect;
 use crate::core::sheep::{Facing, Sheep};
 use crate::core::surfaces::{walkable_surfaces, Surface};
 use crate::core::world::World;
+use crate::desktop_files::DesktopFile;
 use crate::platform::x11_windows;
 use crate::platform::Platform;
+use crate::settings::Settings;
 
 /// Takt des Fenster-Pollers. Abgefragt wird nur jeden
 /// `WINDOW_POLL_IDLE_EVERY`-ten Takt (pro Abfrage ein paar X11-Roundtrips je
@@ -41,15 +42,22 @@ struct DragState {
     start_root: (i32, i32),
 }
 
+/// Im Tray-Menü geänderte Einstellung, die der GTK-Thread live übernimmt.
+#[derive(Debug, Clone, Copy)]
+enum TrayCmd {
+    SheepCount(usize),
+    Color(SpriteColor),
+    WalkOnWindows(bool),
+    Quit,
+}
+
 pub struct LinuxPlatform {
-    sprite_bytes: &'static [u8],
-    /// Fensteroberkanten als Laufflächen anbieten (Plan Abschnitt 6).
-    walk_on_windows: bool,
+    settings: Settings,
 }
 
 impl LinuxPlatform {
-    pub fn new(color: crate::core::anim::SpriteColor, walk_on_windows: bool) -> Self {
-        Self { sprite_bytes: color.png_bytes(), walk_on_windows }
+    pub fn new(settings: Settings) -> Self {
+        Self { settings }
     }
 }
 
@@ -82,8 +90,15 @@ impl Platform for LinuxPlatform {
         out
     }
 
-    fn run<TickFn>(self, sheeps: Vec<Sheep>, tick_ms: u32, tick: TickFn) -> Result<(), String>
+    fn run<SpawnFn, TickFn>(
+        self,
+        sheeps: Vec<Sheep>,
+        spawn: SpawnFn,
+        tick_ms: u32,
+        tick: TickFn,
+    ) -> Result<(), String>
     where
+        SpawnFn: FnMut(usize) -> Sheep + 'static,
         TickFn: FnMut(&mut [Sheep], u32, &World) + 'static,
     {
         let app = Application::builder()
@@ -91,12 +106,31 @@ impl Platform for LinuxPlatform {
             .build();
 
         let sheeps = Rc::new(RefCell::new(sheeps));
+        let spawn = Rc::new(RefCell::new(spawn));
         let tick = Rc::new(RefCell::new(tick));
-        let sprite_bytes = self.sprite_bytes;
-        let walk_on_windows = self.walk_on_windows;
+        let settings = self.settings;
 
+        let built = Cell::new(false);
         app.connect_activate(move |app| {
-            build_ui(app, sheeps.clone(), tick.clone(), tick_ms, sprite_bytes, walk_on_windows);
+            // Ein weiterer Start (z. B. aus dem Startmenü) landet über die
+            // Application-ID per D-Bus als erneutes activate bei dieser
+            // Instanz – Overlays und Tray gibt es dann schon.
+            if built.replace(true) {
+                return;
+            }
+            // Tray-Icon in eigenem Thread; Menü-Aktionen kommen über den Kanal
+            // und werden im GTK-Loop (build_ui) angewendet. Erst hier gestartet,
+            // damit ein zweiter Prozess kein eigenes Icon anlegt.
+            let tray_rx = start_tray_service(settings);
+            build_ui(
+                app,
+                sheeps.clone(),
+                spawn.clone(),
+                tick.clone(),
+                tick_ms,
+                settings,
+                tray_rx,
+            );
         });
 
         // SIGINT (Ctrl+C im Terminal) sauber abfangen und Application beenden.
@@ -105,19 +139,6 @@ impl Platform for LinuxPlatform {
         glib::unix_signal_add_local(2, move || {
             app_for_sig.quit();
             glib::ControlFlow::Break
-        });
-
-        // Tray-Icon in eigenem Thread. Beim Klick auf "Beenden" wird ein
-        // AtomicBool gesetzt; der GTK-Loop pollt es und beendet dann sauber.
-        let quit_flag = start_tray_service();
-        let app_for_tray = app.clone();
-        glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
-            if quit_flag.load(Ordering::Relaxed) {
-                app_for_tray.quit();
-                glib::ControlFlow::Break
-            } else {
-                glib::ControlFlow::Continue
-            }
         });
 
         // Wir starten die App mit leerem Arg-Vektor, damit GTK unsere CLI-Args
@@ -132,14 +153,16 @@ impl Platform for LinuxPlatform {
     }
 }
 
-fn build_ui<TickFn>(
+fn build_ui<SpawnFn, TickFn>(
     app: &Application,
     sheeps: Rc<RefCell<Vec<Sheep>>>,
+    spawn: Rc<RefCell<SpawnFn>>,
     tick: Rc<RefCell<TickFn>>,
     tick_ms: u32,
-    sprite_bytes: &'static [u8],
-    walk_on_windows: bool,
+    settings: Settings,
+    tray_rx: mpsc::Receiver<TrayCmd>,
 ) where
+    SpawnFn: FnMut(usize) -> Sheep + 'static,
     TickFn: FnMut(&mut [Sheep], u32, &World) + 'static,
 {
     let display = gdk4::Display::default().expect("kein GDK-Display");
@@ -158,7 +181,8 @@ fn build_ui<TickFn>(
         return;
     }
 
-    let sprite = load_sprite(sprite_bytes);
+    // Austauschbar, damit die Farbe im Tray-Menü live wechseln kann.
+    let sprite = Rc::new(RefCell::new(load_sprite(settings.color)));
 
     let css = gtk4::CssProvider::new();
     css.load_from_string("window, .background { background-color: rgba(0,0,0,0); }");
@@ -215,11 +239,12 @@ fn build_ui<TickFn>(
         area.set_draw_func(move |_, cr, _w, _h| {
             let all = sheeps_draw.borrow();
             for s in all.iter().filter(|s| s.monitor_idx == my_idx) {
+                let sprite = sprite_draw.borrow();
                 if let Some(p) = s.prop() {
-                    draw_tile(cr, sprite_draw.as_ref(), p.frame, p.x, p.y, p.mirrored, p.alpha);
+                    draw_tile(cr, &sprite, p.frame, p.x, p.y, p.mirrored, p.alpha);
                 }
                 let mirrored = s.facing == Facing::Right;
-                draw_tile(cr, sprite_draw.as_ref(), s.current_frame(), s.x, s.y, mirrored, 1.0);
+                draw_tile(cr, &sprite, s.current_frame(), s.x, s.y, mirrored, 1.0);
             }
         });
 
@@ -392,9 +417,44 @@ fn build_ui<TickFn>(
         glib::ControlFlow::Continue
     });
 
-    if walk_on_windows {
-        start_window_poller(overlays.clone(), surfaces.clone());
-    }
+    // Fensteroberkanten als Laufflächen (Plan Abschnitt 6); im Tray-Menü
+    // abschaltbar.
+    let walk_on_windows = Rc::new(Cell::new(settings.walk_on_windows));
+    start_window_poller(overlays.clone(), surfaces.clone(), walk_on_windows.clone());
+
+    // Menü-Aktionen aus dem Tray-Thread anwenden.
+    let app_quit = app.downgrade();
+    let sheeps_menu = sheeps.clone();
+    let drag_menu = drag_state.clone();
+    let sprite_menu = sprite.clone();
+    glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+        while let Ok(cmd) = tray_rx.try_recv() {
+            match cmd {
+                TrayCmd::Quit => {
+                    if let Some(app) = app_quit.upgrade() {
+                        app.quit();
+                    }
+                    return glib::ControlFlow::Break;
+                }
+                TrayCmd::SheepCount(n) => {
+                    let mut all = sheeps_menu.borrow_mut();
+                    all.truncate(n);
+                    while all.len() < n {
+                        let i = all.len();
+                        all.push((spawn.borrow_mut())(i));
+                    }
+                    // Wurde gerade das gezogene Schaf entfernt, die Geste verwerfen.
+                    let mut ds = drag_menu.borrow_mut();
+                    if ds.as_ref().is_some_and(|d| d.sheep_idx >= n) {
+                        *ds = None;
+                    }
+                }
+                TrayCmd::Color(c) => *sprite_menu.borrow_mut() = load_sprite(c),
+                TrayCmd::WalkOnWindows(on) => walk_on_windows.set(on),
+            }
+        }
+        glib::ControlFlow::Continue
+    });
 
     // Cursor-Poller: bei Mausbewegung alle schlafenden Sheeps wecken.
     let poller = PointerPoller::new();
@@ -419,9 +479,13 @@ fn build_ui<TickFn>(
 ///
 /// Mit `DESKTOP_SHEEP_DEBUG=1` werden Fenster und Kanten bei jeder Änderung
 /// auf stderr ausgegeben (zum Abgleich mit `wmctrl -lG` / `xprop`).
+///
+/// Ist `enabled` aus, bleiben die Kanten leer – Schafe auf Fenstern fallen
+/// dann herunter wie bei einem weggezogenen Fenster.
 fn start_window_poller(
     overlays: Rc<RefCell<Vec<OverlayHandle>>>,
     surfaces: Rc<RefCell<Vec<Vec<Surface>>>>,
+    enabled: Rc<Cell<bool>>,
 ) {
     use gdk4_x11::prelude::*;
     let Some(display) = gdk4::Display::default() else { return };
@@ -437,6 +501,14 @@ fn start_window_poller(
 
     glib::timeout_add_local(std::time::Duration::from_millis(WINDOW_POLL_MS), move || {
         ticks = ticks.wrapping_add(1);
+        if !enabled.get() {
+            if surfaces.borrow().iter().any(|l| !l.is_empty()) {
+                surfaces.borrow_mut().iter_mut().for_each(Vec::clear);
+            }
+            // Nach dem Wiedereinschalten sofort abfragen.
+            changing = true;
+            return glib::ControlFlow::Continue;
+        }
         if !changing && ticks % WINDOW_POLL_IDLE_EVERY != 0 {
             return glib::ControlFlow::Continue;
         }
@@ -673,8 +745,48 @@ fn place_overlay_via_x11(window: &ApplicationWindow, x: i32, y: i32, w: i32, h: 
     }
 }
 
+/// Größte Anzahl, die das Menü direkt anbietet; per `--sheep` gesetzte
+/// größere Werte erscheinen zusätzlich.
+const MENU_MAX_SHEEP: usize = 10;
+
+/// Menü-Bezeichnung einer Farbvariante.
+fn color_label(c: SpriteColor) -> &'static str {
+    match c {
+        SpriteColor::Default => "Weiß (Original)",
+        SpriteColor::Blue => "Blau",
+        SpriteColor::Green => "Grün",
+        SpriteColor::Orange => "Orange",
+        SpriteColor::Pink => "Rosa",
+        SpriteColor::Purple => "Lila",
+        SpriteColor::Red => "Rot",
+        SpriteColor::Yellow => "Gelb",
+    }
+}
+
+/// Läuft im ksni-Thread und hält die Einstellungen, die das Menü anzeigt.
 struct DesktopSheepTray {
-    quit_flag: Arc<AtomicBool>,
+    settings: Settings,
+    tx: mpsc::Sender<TrayCmd>,
+}
+
+impl DesktopSheepTray {
+    /// Übernimmt eine geänderte Einstellung, speichert sie und reicht sie an
+    /// den GTK-Thread weiter.
+    fn apply(&mut self, cmd: TrayCmd) {
+        let before = self.settings;
+        match cmd {
+            TrayCmd::SheepCount(n) => self.settings.n_sheep = n,
+            TrayCmd::Color(c) => self.settings.color = c,
+            TrayCmd::WalkOnWindows(on) => self.settings.walk_on_windows = on,
+            TrayCmd::Quit => {}
+        }
+        if self.settings != before {
+            if let Err(e) = self.settings.save() {
+                eprintln!("Einstellungen konnten nicht gespeichert werden: {e}");
+            }
+        }
+        let _ = self.tx.send(cmd);
+    }
 }
 
 impl ksni::Tray for DesktopSheepTray {
@@ -695,35 +807,107 @@ impl ksni::Tray for DesktopSheepTray {
     }
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
         use ksni::menu::*;
-        vec![StandardItem {
-            label: "Beenden".into(),
-            icon_name: "application-exit".into(),
-            activate: Box::new(|tray: &mut Self| {
-                tray.quit_flag.store(true, Ordering::Relaxed);
-            }),
-            ..Default::default()
+        let n = self.settings.n_sheep;
+        let mut counts: Vec<usize> = (1..=MENU_MAX_SHEEP).collect();
+        if n > MENU_MAX_SHEEP {
+            counts.push(n);
         }
-        .into()]
+        let count_options = counts
+            .iter()
+            .map(|c| RadioItem { label: c.to_string(), ..Default::default() })
+            .collect();
+        let color_options = SpriteColor::ALL
+            .iter()
+            .map(|&c| RadioItem { label: color_label(c).into(), ..Default::default() })
+            .collect();
+
+        vec![
+            SubMenu {
+                label: format!("Anzahl Schafe ({n})"),
+                submenu: vec![RadioGroup {
+                    selected: counts.iter().position(|&c| c == n).unwrap_or(0),
+                    select: Box::new(move |tray: &mut Self, i| {
+                        tray.apply(TrayCmd::SheepCount(counts[i]));
+                    }),
+                    options: count_options,
+                }
+                .into()],
+                ..Default::default()
+            }
+            .into(),
+            SubMenu {
+                label: "Farbe".into(),
+                submenu: vec![RadioGroup {
+                    selected: SpriteColor::ALL
+                        .iter()
+                        .position(|&c| c == self.settings.color)
+                        .unwrap_or(0),
+                    select: Box::new(|tray: &mut Self, i| {
+                        tray.apply(TrayCmd::Color(SpriteColor::ALL[i]));
+                    }),
+                    options: color_options,
+                }
+                .into()],
+                ..Default::default()
+            }
+            .into(),
+            CheckmarkItem {
+                label: "Auf Fenstern laufen".into(),
+                checked: self.settings.walk_on_windows,
+                activate: Box::new(|tray: &mut Self| {
+                    let on = !tray.settings.walk_on_windows;
+                    tray.apply(TrayCmd::WalkOnWindows(on));
+                }),
+                ..Default::default()
+            }
+            .into(),
+            desktop_file_item("Beim Anmelden starten", DesktopFile::Autostart),
+            desktop_file_item("Im Startmenü anzeigen", DesktopFile::StartMenu),
+            MenuItem::Separator,
+            StandardItem {
+                label: "Beenden".into(),
+                icon_name: "application-exit".into(),
+                activate: Box::new(|tray: &mut Self| tray.apply(TrayCmd::Quit)),
+                ..Default::default()
+            }
+            .into(),
+        ]
     }
 }
 
-/// Startet den ksni-TrayService in einem eigenen Thread und liefert ein
-/// AtomicBool zurück, das vom Beenden-Menüpunkt gesetzt wird.
-fn start_tray_service() -> Arc<AtomicBool> {
-    let flag = Arc::new(AtomicBool::new(false));
-    let tray = DesktopSheepTray { quit_flag: flag.clone() };
-    let service = ksni::TrayService::new(tray);
-    service.spawn();
-    flag
+/// Menüpunkt, der einen .desktop-Eintrag an- bzw. abschaltet.
+fn desktop_file_item(label: &str, file: DesktopFile) -> ksni::MenuItem<DesktopSheepTray> {
+    ksni::menu::CheckmarkItem {
+        label: label.into(),
+        checked: file.is_installed(),
+        activate: Box::new(move |_: &mut DesktopSheepTray| {
+            if let Err(e) = file.toggle() {
+                let path = file.path().unwrap_or_default();
+                eprintln!("{} konnte nicht geändert werden: {e}", path.display());
+            }
+        }),
+        ..Default::default()
+    }
+    .into()
 }
 
-fn load_sprite(bytes: &'static [u8]) -> Rc<Option<ImageSurface>> {
-    let mut reader = std::io::Cursor::new(bytes);
+/// Startet den ksni-TrayService in einem eigenen Thread. Menü-Aktionen
+/// kommen über den zurückgegebenen Kanal beim GTK-Loop an.
+fn start_tray_service(settings: Settings) -> mpsc::Receiver<TrayCmd> {
+    let (tx, rx) = mpsc::channel();
+    let tray = DesktopSheepTray { settings, tx };
+    let service = ksni::TrayService::new(tray);
+    service.spawn();
+    rx
+}
+
+fn load_sprite(color: SpriteColor) -> Option<ImageSurface> {
+    let mut reader = std::io::Cursor::new(color.png_bytes());
     match ImageSurface::create_from_png(&mut reader) {
-        Ok(s) => Rc::new(Some(s)),
+        Ok(s) => Some(s),
         Err(e) => {
             eprintln!("Sprite konnte nicht geladen werden: {e}");
-            Rc::new(None)
+            None
         }
     }
 }

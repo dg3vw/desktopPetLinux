@@ -30,8 +30,12 @@ unterstützt.
   auf ein Fenster darunter
 - Mehrere Schafe gleichzeitig (`--sheep N`)
 - Farbvarianten (`--color`)
-- Tray-Icon mit „Beenden“
-- Autostart-Eintrag per Kommandozeile
+- Tray-Menü: Anzahl Schafe, Farbe, „Auf Fenstern laufen“, „Beim
+  Anmelden starten“ und „Im Startmenü anzeigen“ – wirkt sofort und wird
+  gespeichert; dazu „Beenden“
+- Autostart- und Startmenü-Eintrag per Tray-Menü oder Kommandozeile
+- Läuft nur einmal: ein weiterer Start (z. B. aus dem Startmenü) beendet
+  sich sofort, wenn schon Schafe unterwegs sind
 
 ## Bauen
 
@@ -54,13 +58,22 @@ cargo build --release
 desktop_sheep [OPTIONEN]              starten
 desktop_sheep --install-autostart     ~/.config/autostart/desktop-sheep.desktop anlegen
 desktop_sheep --remove-autostart      Autostart-Eintrag entfernen
+desktop_sheep --install-menu          Startmenü-Eintrag in ~/.local/share/applications/ anlegen
+desktop_sheep --remove-menu           Startmenü-Eintrag entfernen
 desktop_sheep --help
 
-Optionen:
+Optionen (überschreiben die im Tray-Menü gespeicherten Einstellungen):
   --sheep N        Anzahl Schafe (Standard: 1)
   --color FARBE    default | blue | green | orange | pink | purple | red | yellow
   --no-windows     nur am Boden laufen, nicht auf Fensteroberkanten
+  --windows        auch auf Fensteroberkanten laufen (Standard)
 ```
+
+Dieselben Einstellungen lassen sich zur Laufzeit im Menü des Tray-Icons
+ändern. Sie werden in `~/.config/desktop_sheep/settings.conf` gespeichert
+und beim nächsten Start (auch per Autostart) übernommen. Optionen auf der
+Kommandozeile gelten nur für diesen Lauf – gespeichert wird erst, wenn im
+Menü etwas geändert wird.
 
 Beenden über das Tray-Icon oder `Ctrl+C` im Terminal.
 
@@ -96,6 +109,8 @@ alter oder neuerer glibc als der Build-Rechner.
 ```
 src/
   main.rs            CLI, Schafe erzeugen, Tick-Callback
+  settings.rs        gespeicherte Einstellungen (settings.conf)
+  desktop_files.rs   .desktop-Einträge für Autostart und Startmenü
   core/              plattformunabhängig (kein GTK/X11)
     geometry.rs      Monitor-Rechtecke → Boden-Segmente
     surfaces.rs      Fensterrechtecke → begehbare, unverdeckte Oberkanten
@@ -105,7 +120,7 @@ src/
   platform/
     mod.rs           Platform-Trait
     linux.rs         GTK4/X11-Backend: ein Overlay pro Monitor, Input-Region,
-                     Drag, WM-Hints, Tray (ksni), Fenster-Poller
+                     Drag, WM-Hints, Tray-Menü (ksni), Fenster-Poller
     x11_windows.rs   Fensterliste per EWMH (_NET_CLIENT_LIST_STACKING,
                      Frame-/CSD-Extents, Filter für Desktop/Dock/minimiert)
 assets/              Sprite-Sheets (40×40-Kacheln, 16 Spalten)

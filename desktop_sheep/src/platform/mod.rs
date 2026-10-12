@@ -18,8 +18,17 @@ pub trait Platform {
     /// als das theoretische Monitorrechteck (Panels, WM-Struts) – deshalb
     /// authoritativ für Wenden/Boden. `world.surfaces[i]` sind die
     /// begehbaren Fensterkanten auf diesem Overlay (Plan Abschnitt 6).
-    fn run<TickFn>(self, sheeps: Vec<Sheep>, tick_ms: u32, tick: TickFn) -> Result<(), String>
+    /// `spawn(i)` erzeugt Schaf Nr. `i`, wenn die Anzahl zur Laufzeit
+    /// (Tray-Menü) erhöht wird.
+    fn run<SpawnFn, TickFn>(
+        self,
+        sheeps: Vec<Sheep>,
+        spawn: SpawnFn,
+        tick_ms: u32,
+        tick: TickFn,
+    ) -> Result<(), String>
     where
+        SpawnFn: FnMut(usize) -> Sheep + 'static,
         TickFn: FnMut(&mut [Sheep], u32, &World) + 'static;
 }
 

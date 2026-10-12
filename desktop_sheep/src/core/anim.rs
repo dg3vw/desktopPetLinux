@@ -28,6 +28,32 @@ pub enum SpriteColor {
 }
 
 impl SpriteColor {
+    /// Alle Varianten in Menü-Reihenfolge.
+    pub const ALL: [Self; 8] = [
+        Self::Default,
+        Self::Blue,
+        Self::Green,
+        Self::Orange,
+        Self::Pink,
+        Self::Purple,
+        Self::Red,
+        Self::Yellow,
+    ];
+
+    /// Name wie bei `--color` (Umkehrung von `from_name`).
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Blue => "blue",
+            Self::Green => "green",
+            Self::Orange => "orange",
+            Self::Pink => "pink",
+            Self::Purple => "purple",
+            Self::Red => "red",
+            Self::Yellow => "yellow",
+        }
+    }
+
     pub fn from_name(s: &str) -> Option<Self> {
         Some(match s.to_ascii_lowercase().as_str() {
             "default" | "original" | "white" => Self::Default,
