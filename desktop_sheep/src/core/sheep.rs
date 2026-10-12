@@ -1,4 +1,4 @@
-use super::anim::{def, pick_next, AnimId, Rng, TILE_H, TILE_W};
+use super::anim::{def, pick_next, AnimId, Rng, SpriteColor, TILE_H, TILE_W};
 use super::geometry::GroundSegment;
 use super::surfaces::{Surface, WindowId};
 use super::world::World;
@@ -44,6 +44,16 @@ const FADE_MS: u32 = 500;
 /// schwarzen Schaf; der Rest fällt wie gehabt von oben herein.
 const ENTRY_BATH_PERCENT: u32 = 15;
 const ENTRY_VISIT_PERCENT: u32 = 15;
+/// Abstand der Sprite-Mitten, ab dem ein laufendes Schaf auf ein anderes
+/// vor sich reagiert (Bocksprung oder Umdrehen).
+const MEET_DISTANCE: f32 = 55.0;
+/// Wahrscheinlichkeit (%), über ein Schaf im Weg zu springen statt
+/// umzudrehen – im Gehen bzw. im Sprint.
+const LEAP_PERCENT_WALK: u32 = 40;
+const LEAP_PERCENT_RUN: u32 = 75;
+/// Höhenunterschied (Pixel), bis zu dem zwei Schafe als auf derselben
+/// Fläche stehend gelten.
+const SAME_LEVEL_PX: f32 = 4.0;
 
 /// Wie ein Schaf (neu) ins Bild kommt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +107,8 @@ pub struct Sheep {
     /// Index in die von der Platform gelieferte Segment-/Overlay-Liste.
     /// Wechselt beim Übergang über eine angrenzende Monitorkante.
     pub monitor_idx: usize,
+    /// Farbvariante, mit der dieses Schaf gezeichnet wird.
+    pub color: SpriteColor,
     /// True während der Benutzer das Sprite zieht: zappelt, aber bewegt
     /// sich nicht von selbst und wechselt den Zustand nicht.
     pub dragged: bool,
@@ -139,6 +151,7 @@ impl Sheep {
             y: 0.0,
             facing: Facing::Right,
             monitor_idx,
+            color: SpriteColor::Default,
             dragged: false,
             falling: false,
             vx: 0.0,
@@ -159,6 +172,12 @@ impl Sheep {
         };
         s.drop_in(monitor_idx, x);
         s
+    }
+
+    /// Wählt eine zufällige Farbvariante (Modus „jedes Schaf anders“).
+    pub fn randomize_color(&mut self) {
+        let n = SpriteColor::ALL.len() as u32;
+        self.color = SpriteColor::ALL[self.rng.range(n) as usize];
     }
 
     /// Statt von oben hereinzufallen, den Auftritt `entry` spielen, sobald
@@ -354,9 +373,9 @@ impl Sheep {
             match seg {
                 Some(s) => self.check_window_edge(&s),
                 None => {
-                    self.check_floor_edge(segments, world);
-                    if self.falling {
-                        // Aus dem Bild gelaufen und oben neu eingestiegen.
+                    if self.check_floor_edge(segments, world) {
+                        // Aus dem Bild gelaufen und neu aufgetreten – der
+                        // Auftritt hat Position und Höhe selbst gesetzt.
                         return;
                     }
                 }
@@ -682,13 +701,15 @@ impl Sheep {
     }
 
     /// Am Boden: Monitorwechsel, Umdrehen oder aus dem Bild laufen.
-    fn check_floor_edge(&mut self, segments: &[GroundSegment], world: &World) {
+    /// Rückgabe: true, wenn das Schaf ganz draußen war und neu aufgetreten ist.
+    fn check_floor_edge(&mut self, segments: &[GroundSegment], world: &World) -> bool {
         let (aw, _) = world.dims(self.monitor_idx);
         if self.leaving {
             if self.x <= -(TILE_W as f32) || self.x >= aw as f32 {
                 self.respawn(world);
+                return true;
             }
-            return;
+            return false;
         }
         let min_x = 0.0f32;
         let max_x = (aw - TILE_W as i32).max(0) as f32;
@@ -697,15 +718,15 @@ impl Sheep {
         } else if self.x >= max_x {
             Facing::Right
         } else {
-            return;
+            return false;
         };
         if self.try_cross(segments, world, dir) {
-            return;
+            return false;
         }
         let r = self.rng.range(100);
         if r < LEAVE_PERCENT {
             self.leaving = true;
-            return;
+            return false;
         }
         self.x = if dir == Facing::Left { min_x } else { max_x };
         if r < LEAVE_PERCENT + CLIMB_PERCENT {
@@ -713,6 +734,7 @@ impl Sheep {
         } else {
             self.begin_turn();
         }
+        false
     }
 
     /// An der Bildschirmwand: hoch- bzw. runterklettern. Hochgeklettert wird
@@ -897,6 +919,68 @@ impl Sheep {
         self.set_anim(next);
     }
 
+    /// Läuft das Schaf gerade normal auf Boden oder Fensterkante – nur dann
+    /// weicht es anderen Schafen aus.
+    fn walking_on_level(&self) -> bool {
+        !self.falling
+            && !self.dragged
+            && !self.leaving
+            && self.pending_entry.is_none()
+            && self.hang_offset == 0.0
+            && matches!(self.anim, AnimId::Walk | AnimId::RunBegin | AnimId::Run | AnimId::RunEnd)
+    }
+
+    /// Wie weit `other` in Laufrichtung vor diesem Schaf auf derselben
+    /// Fläche steht (Abstand der Sprite-Mitten); `None`, wenn nicht.
+    fn ahead_on_level(&self, other: &Sheep) -> Option<f32> {
+        if other.monitor_idx != self.monitor_idx
+            || other.falling
+            || other.dragged
+            || other.support != self.support
+            || (other.y - self.y).abs() > SAME_LEVEL_PX
+        {
+            return None;
+        }
+        let ahead = (other.x - self.x) * self.forward();
+        (ahead > 0.0).then_some(ahead)
+    }
+
+    /// Strecke, die der Bocksprung zurücklegt.
+    fn jump_distance() -> f32 {
+        let jump = def(AnimId::Jump);
+        let ticks = (jump.frames.len() as u32 * jump.interval_ms) as f32 / 16.0;
+        jump.dx_per_tick as f32 * SPEED_SCALE * ticks
+    }
+
+    /// Ist hinter dem Hindernis genug Platz, um nach dem Bocksprung noch auf
+    /// derselben Fläche zu landen?
+    fn room_to_leap(&self, world: &World) -> bool {
+        let half = TILE_W as f32 / 2.0;
+        let land = self.x + half + self.forward() * Self::jump_distance();
+        match self.support {
+            Some(window) => self.find_support(window, world).is_some_and(|s| {
+                land >= s.x_start as f32 + EDGE_MARGIN && land <= s.x_end as f32 - EDGE_MARGIN
+            }),
+            None => {
+                let (aw, _) = world.dims(self.monitor_idx);
+                land >= half && land <= aw as f32 - half
+            }
+        }
+    }
+
+    /// Ein Schaf steht im Weg: drüberspringen oder umdrehen. Springt das
+    /// andere gerade selbst, wird umgedreht – sonst treffen sie sich in der Luft.
+    fn meet_sheep(&mut self, other_jumping: bool, world: &World) {
+        let leap_percent = match self.anim {
+            AnimId::Run | AnimId::RunBegin => LEAP_PERCENT_RUN,
+            _ => LEAP_PERCENT_WALK,
+        };
+        let leap = !other_jumping
+            && self.rng.range(100) < leap_percent
+            && self.room_to_leap(world);
+        self.set_anim(if leap { AnimId::Jump } else { AnimId::Rotate1A });
+    }
+
     /// Versucht, in Bewegungsrichtung auf den Nachbarmonitor zu wechseln.
     /// Voraussetzung: das Nachbarsegment schließt in X nahtlos an und hat
     /// (annähernd) dieselbe Bodenhöhe. Rückgabe: true wenn gewechselt.
@@ -939,6 +1023,28 @@ impl Sheep {
                 self.facing = Facing::Left;
                 true
             }
+        }
+    }
+}
+
+/// Lässt Schafe nicht durcheinander hindurchlaufen: Kommt ein laufendes
+/// Schaf einem anderen auf derselben Fläche zu nahe, springt es darüber
+/// oder dreht um. Nach jedem Tick aller Schafe aufrufen.
+pub fn avoid_collisions(sheeps: &mut [Sheep], world: &World) {
+    for i in 0..sheeps.len() {
+        if !sheeps[i].walking_on_level() {
+            continue;
+        }
+        let me = &sheeps[i];
+        let nearest = sheeps
+            .iter()
+            .enumerate()
+            .filter(|&(j, _)| j != i)
+            .filter_map(|(_, o)| Some((me.ahead_on_level(o)?, o.anim == AnimId::Jump)))
+            .filter(|&(ahead, _)| ahead <= MEET_DISTANCE)
+            .min_by(|a, b| a.0.total_cmp(&b.0));
+        if let Some((_, other_jumping)) = nearest {
+            sheeps[i].meet_sheep(other_jumping, world);
         }
     }
 }
@@ -1173,6 +1279,116 @@ mod tests {
         assert_eq!(s.anim, AnimId::Run);
         assert_eq!(s.y, floor);
         assert!(s.x > 300.0);
+    }
+
+    /// Zwei Schafe am Boden, die aufeinander zulaufen.
+    fn facing_each_other(seed: u64, anim: AnimId) -> [Sheep; 2] {
+        let mut a = on_floor(seed);
+        let mut b = on_floor(seed.wrapping_mul(31).wrapping_add(7));
+        (a.x, a.facing) = (600.0, Facing::Right);
+        (b.x, b.facing) = (700.0, Facing::Left);
+        a.set_anim(anim);
+        b.set_anim(anim);
+        [a, b]
+    }
+
+    #[test]
+    fn meeting_sheep_leap_or_turn() {
+        let none: Vec<Vec<Surface>> = vec![vec![]];
+        let world = World { area_dims: &DIMS, surfaces: &none };
+        let (mut leaps, mut turns) = (0, 0);
+        for seed in 0..40 {
+            let mut pair = facing_each_other(seed, AnimId::Run);
+            let mut reacted = [None, None];
+            for _ in 0..60 {
+                for s in pair.iter_mut() {
+                    s.tick(16, &SEGS, &world);
+                }
+                avoid_collisions(&mut pair, &world);
+                for (r, s) in reacted.iter_mut().zip(&pair) {
+                    if r.is_none() && matches!(s.anim, AnimId::Jump | AnimId::Rotate1A) {
+                        *r = Some(s.anim);
+                    }
+                }
+            }
+            // Beide reagieren, aber nie springen beide gleichzeitig.
+            assert!(reacted.iter().all(Option::is_some), "seed {seed}: {reacted:?}");
+            assert_ne!(reacted, [Some(AnimId::Jump); 2], "seed {seed}");
+            leaps += reacted.iter().filter(|r| **r == Some(AnimId::Jump)).count();
+            turns += reacted.iter().filter(|r| **r == Some(AnimId::Rotate1A)).count();
+        }
+        assert!(leaps > 0 && turns > 0, "Sprünge {leaps}, Umdrehen {turns}");
+    }
+
+    #[test]
+    fn sheep_never_walk_through_each_other() {
+        let none: Vec<Vec<Surface>> = vec![vec![]];
+        let world = World { area_dims: &DIMS, surfaces: &none };
+        let floor = 1080.0 - TILE_H as f32;
+        // Am Boden laufen und nicht gerade springen/auftreten.
+        let grounded = |s: &Sheep| {
+            s.y == floor
+                && !s.falling
+                && !matches!(s.anim, AnimId::Jump | AnimId::VisitRun | AnimId::VisitWalk)
+        };
+        for seed in 0..30 {
+            for anim in [AnimId::Walk, AnimId::Run] {
+                let mut pair = facing_each_other(seed, anim);
+                let mut prev = pair.each_ref().map(|s| (s.x, grounded(s)));
+                for step in 0..(60_000 / 16) {
+                    for s in pair.iter_mut() {
+                        s.tick(16, &SEGS, &world);
+                    }
+                    avoid_collisions(&mut pair, &world);
+                    let now = pair.each_ref().map(|s| (s.x, grounded(s)));
+                    let all_grounded = prev.iter().chain(&now).all(|&(_, g)| g);
+                    let order_flipped = (prev[0].0 < prev[1].0) != (now[0].0 < now[1].0);
+                    assert!(
+                        !(all_grounded && order_flipped),
+                        "seed {seed} {anim:?} Schritt {step}: durcheinander hindurch ({:?} / {:?}) {prev:?} {now:?} y={} {}",
+                        pair[0].anim,
+                        pair[1].anim,
+                        pair[0].y,
+                        pair[1].y
+                    );
+                    prev = now;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn no_leap_without_room_to_land() {
+        let none: Vec<Vec<Surface>> = vec![vec![]];
+        let world = World { area_dims: &DIMS, surfaces: &none };
+        for seed in 0..40 {
+            // Kurz vor der rechten Wand: hinter dem anderen Schaf ist kein Platz.
+            let mut pair = facing_each_other(seed, AnimId::Run);
+            pair[0].x = 1920.0 - TILE_W as f32 - 100.0;
+            pair[1].x = pair[0].x + 50.0;
+            pair[1].set_anim(AnimId::Eat);
+            avoid_collisions(&mut pair, &world);
+            assert_eq!(pair[0].anim, AnimId::Rotate1A, "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn bath_meteor_after_walking_off_starts_in_the_air() {
+        let none: Vec<Vec<Surface>> = vec![vec![]];
+        let world = World { area_dims: &DIMS, surfaces: &none };
+        let floor = 1080.0 - TILE_H as f32;
+        let mut meteors = 0;
+        for seed in 0..60 {
+            let mut s = on_floor(seed);
+            (s.x, s.facing, s.leaving) = (1919.0, Facing::Right, true);
+            s.set_anim(AnimId::Walk);
+            s.tick(16, &SEGS, &world);
+            if s.anim == AnimId::BathFly {
+                meteors += 1;
+                assert!(s.y < floor - 100.0, "seed {seed}: Meteor startet bei y={}", s.y);
+            }
+        }
+        assert!(meteors > 0);
     }
 
     #[test]

@@ -17,7 +17,7 @@ use crate::core::world::World;
 use crate::desktop_files::DesktopFile;
 use crate::platform::x11_windows;
 use crate::platform::Platform;
-use crate::settings::Settings;
+use crate::settings::{ColorChoice, Settings};
 
 /// Takt des Fenster-Pollers. Abgefragt wird nur jeden
 /// `WINDOW_POLL_IDLE_EVERY`-ten Takt (pro Abfrage ein paar X11-Roundtrips je
@@ -46,7 +46,7 @@ struct DragState {
 #[derive(Debug, Clone, Copy)]
 enum TrayCmd {
     SheepCount(usize),
-    Color(SpriteColor),
+    Color(ColorChoice),
     WalkOnWindows(bool),
     Quit,
 }
@@ -181,8 +181,13 @@ fn build_ui<SpawnFn, TickFn>(
         return;
     }
 
-    // Austauschbar, damit die Farbe im Tray-Menü live wechseln kann.
-    let sprite = Rc::new(RefCell::new(load_sprite(settings.color)));
+    // Alle Farbvarianten vorladen – jedes Schaf wird mit seiner eigenen
+    // gezeichnet, und die Farbe kann im Tray-Menü live wechseln.
+    let sprites: Rc<Vec<Option<ImageSurface>>> =
+        Rc::new(SpriteColor::ALL.iter().map(|&c| load_sprite(c)).collect());
+    for s in sheeps.borrow_mut().iter_mut() {
+        settings.color.apply_to(s);
+    }
 
     let css = gtk4::CssProvider::new();
     css.load_from_string("window, .background { background-color: rgba(0,0,0,0); }");
@@ -234,17 +239,17 @@ fn build_ui<SpawnFn, TickFn>(
 
         // Draw-Func: rendert alle Sheeps, die auf DIESEM Monitor stehen.
         let sheeps_draw = sheeps.clone();
-        let sprite_draw = sprite.clone();
+        let sprites_draw = sprites.clone();
         let my_idx = idx;
         area.set_draw_func(move |_, cr, _w, _h| {
             let all = sheeps_draw.borrow();
             for s in all.iter().filter(|s| s.monitor_idx == my_idx) {
-                let sprite = sprite_draw.borrow();
+                let sprite = sprite_for(&sprites_draw, s.color);
                 if let Some(p) = s.prop() {
-                    draw_tile(cr, &sprite, p.frame, p.x, p.y, p.mirrored, p.alpha);
+                    draw_tile(cr, sprite, p.frame, p.x, p.y, p.mirrored, p.alpha);
                 }
                 let mirrored = s.facing == Facing::Right;
-                draw_tile(cr, &sprite, s.current_frame(), s.x, s.y, mirrored, 1.0);
+                draw_tile(cr, sprite, s.current_frame(), s.x, s.y, mirrored, 1.0);
             }
         });
 
@@ -426,7 +431,7 @@ fn build_ui<SpawnFn, TickFn>(
     let app_quit = app.downgrade();
     let sheeps_menu = sheeps.clone();
     let drag_menu = drag_state.clone();
-    let sprite_menu = sprite.clone();
+    let mut color = settings.color;
     glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
         while let Ok(cmd) = tray_rx.try_recv() {
             match cmd {
@@ -441,7 +446,9 @@ fn build_ui<SpawnFn, TickFn>(
                     all.truncate(n);
                     while all.len() < n {
                         let i = all.len();
-                        all.push((spawn.borrow_mut())(i));
+                        let mut s = (spawn.borrow_mut())(i);
+                        color.apply_to(&mut s);
+                        all.push(s);
                     }
                     // Wurde gerade das gezogene Schaf entfernt, die Geste verwerfen.
                     let mut ds = drag_menu.borrow_mut();
@@ -449,7 +456,13 @@ fn build_ui<SpawnFn, TickFn>(
                         *ds = None;
                     }
                 }
-                TrayCmd::Color(c) => *sprite_menu.borrow_mut() = load_sprite(c),
+                TrayCmd::Color(c) => {
+                    // Erneut „Zufällig“ wählen würfelt die Farben neu.
+                    color = c;
+                    for s in sheeps_menu.borrow_mut().iter_mut() {
+                        c.apply_to(s);
+                    }
+                }
                 TrayCmd::WalkOnWindows(on) => walk_on_windows.set(on),
             }
         }
@@ -749,17 +762,18 @@ fn place_overlay_via_x11(window: &ApplicationWindow, x: i32, y: i32, w: i32, h: 
 /// größere Werte erscheinen zusätzlich.
 const MENU_MAX_SHEEP: usize = 10;
 
-/// Menü-Bezeichnung einer Farbvariante.
-fn color_label(c: SpriteColor) -> &'static str {
+/// Menü-Bezeichnung einer Farbwahl.
+fn color_label(c: ColorChoice) -> &'static str {
     match c {
-        SpriteColor::Default => "Weiß (Original)",
-        SpriteColor::Blue => "Blau",
-        SpriteColor::Green => "Grün",
-        SpriteColor::Orange => "Orange",
-        SpriteColor::Pink => "Rosa",
-        SpriteColor::Purple => "Lila",
-        SpriteColor::Red => "Rot",
-        SpriteColor::Yellow => "Gelb",
+        ColorChoice::Single(SpriteColor::Default) => "Weiß (Original)",
+        ColorChoice::Single(SpriteColor::Blue) => "Blau",
+        ColorChoice::Single(SpriteColor::Green) => "Grün",
+        ColorChoice::Single(SpriteColor::Orange) => "Orange",
+        ColorChoice::Single(SpriteColor::Pink) => "Rosa",
+        ColorChoice::Single(SpriteColor::Purple) => "Lila",
+        ColorChoice::Single(SpriteColor::Red) => "Rot",
+        ColorChoice::Single(SpriteColor::Yellow) => "Gelb",
+        ColorChoice::Random => "Zufällig (jedes Schaf anders)",
     }
 }
 
@@ -816,7 +830,13 @@ impl ksni::Tray for DesktopSheepTray {
             .iter()
             .map(|c| RadioItem { label: c.to_string(), ..Default::default() })
             .collect();
-        let color_options = SpriteColor::ALL
+        // Alle Einzelfarben, dann „Zufällig“.
+        let choices: Vec<ColorChoice> = SpriteColor::ALL
+            .iter()
+            .map(|&c| ColorChoice::Single(c))
+            .chain([ColorChoice::Random])
+            .collect();
+        let color_options = choices
             .iter()
             .map(|&c| RadioItem { label: color_label(c).into(), ..Default::default() })
             .collect();
@@ -838,12 +858,9 @@ impl ksni::Tray for DesktopSheepTray {
             SubMenu {
                 label: "Farbe".into(),
                 submenu: vec![RadioGroup {
-                    selected: SpriteColor::ALL
-                        .iter()
-                        .position(|&c| c == self.settings.color)
-                        .unwrap_or(0),
-                    select: Box::new(|tray: &mut Self, i| {
-                        tray.apply(TrayCmd::Color(SpriteColor::ALL[i]));
+                    selected: choices.iter().position(|&c| c == self.settings.color).unwrap_or(0),
+                    select: Box::new(move |tray: &mut Self, i| {
+                        tray.apply(TrayCmd::Color(choices[i]));
                     }),
                     options: color_options,
                 }
@@ -899,6 +916,12 @@ fn start_tray_service(settings: Settings) -> mpsc::Receiver<TrayCmd> {
     let service = ksni::TrayService::new(tray);
     service.spawn();
     rx
+}
+
+/// Vorgeladenes Sprite-Sheet einer Farbvariante (Reihenfolge wie `SpriteColor::ALL`).
+fn sprite_for(sprites: &[Option<ImageSurface>], color: SpriteColor) -> &Option<ImageSurface> {
+    let idx = SpriteColor::ALL.iter().position(|&c| c == color).unwrap_or(0);
+    &sprites[idx]
 }
 
 fn load_sprite(color: SpriteColor) -> Option<ImageSurface> {

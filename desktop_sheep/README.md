@@ -28,8 +28,9 @@ unterstützt.
 - Schaf mit der Maus packen und wegziehen, auch über Monitorgrenzen; beim
   Loslassen fällt es mit Schwerkraft und federt nach – auf den Boden oder
   auf ein Fenster darunter
-- Mehrere Schafe gleichzeitig (`--sheep N`)
-- Farbvarianten (`--color`)
+- Mehrere Schafe gleichzeitig (`--sheep N`); sie laufen nicht durcheinander
+  hindurch, sondern springen übereinander hinweg oder drehen um
+- Farbvarianten (`--color`), auch zufällig je Schaf (`--color random`)
 - Tray-Menü: Anzahl Schafe, Farbe, „Auf Fenstern laufen“, „Beim
   Anmelden starten“ und „Im Startmenü anzeigen“ – wirkt sofort und wird
   gespeichert; dazu „Beenden“
@@ -65,6 +66,7 @@ desktop_sheep --help
 Optionen (überschreiben die im Tray-Menü gespeicherten Einstellungen):
   --sheep N        Anzahl Schafe (Standard: 1)
   --color FARBE    default | blue | green | orange | pink | purple | red | yellow
+                   | random (jedes Schaf zufällig)
   --no-windows     nur am Boden laufen, nicht auf Fensteroberkanten
   --windows        auch auf Fensteroberkanten laufen (Standard)
 ```

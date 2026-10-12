@@ -5,12 +5,11 @@ mod settings;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::core::anim::SpriteColor;
 use crate::core::geometry::ground_segments;
-use crate::core::sheep::{Entry, Sheep};
+use crate::core::sheep::{avoid_collisions, Entry, Sheep};
 use crate::desktop_files::DesktopFile;
 use crate::platform::{CurrentPlatform, Platform};
-use crate::settings::Settings;
+use crate::settings::{ColorChoice, Settings};
 
 #[derive(Debug)]
 enum Command {
@@ -36,6 +35,7 @@ fn print_help() {
          Optionen (überschreiben die im Tray-Menü gespeicherten Einstellungen):\n  \
            --sheep N        Anzahl Schafe (Standard: 1)\n  \
            --color FARBE    default | blue | green | orange | pink | purple | red | yellow\n  \
+                            | random (jedes Schaf zufällig)\n  \
            --no-windows     nur am Boden laufen, nicht auf Fensteroberkanten\n  \
            --windows        auch auf Fensteroberkanten laufen (Standard)\n"
     );
@@ -63,7 +63,7 @@ fn parse_args() -> Command {
                     eprintln!("--color: Farbe fehlt");
                     return Command::Help;
                 };
-                match SpriteColor::from_name(&v) {
+                match ColorChoice::from_name(&v) {
                     Some(c) => settings.color = c,
                     None => {
                         eprintln!("Unbekannte Farbe: {v}");
@@ -149,6 +149,7 @@ fn run_overlay(settings: Settings) {
         for s in all.iter_mut() {
             s.tick(dt, &seg_for_tick, world);
         }
+        avoid_collisions(all, world);
     }) {
         eprintln!("Backend-Fehler: {e}");
         std::process::exit(1);

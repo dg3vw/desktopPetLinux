@@ -15,7 +15,7 @@ pub fn frame_to_tile(index: u32) -> (u32, u32) {
 /// Upstream-Repos extrahiert und liegen als `sheep_<farbe>.png` in `assets/`.
 /// Alle Varianten teilen die Frame-Nummerierung der ersten 11 Zeilen mit dem
 /// Original, weshalb dieselbe Animations-Tabelle funktioniert.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SpriteColor {
     Default,
     Blue,
