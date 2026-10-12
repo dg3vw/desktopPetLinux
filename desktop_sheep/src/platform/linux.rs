@@ -1,4 +1,5 @@
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::Instant;
@@ -7,7 +8,8 @@ use cairo::ImageSurface;
 use gdk4::prelude::*;
 use gtk4::glib;
 use gtk4::prelude::*;
-use gtk4::{Application, ApplicationWindow, DrawingArea};
+use gtk4::subclass::prelude::*;
+use gtk4::{Application, ApplicationWindow};
 
 use crate::core::anim::{SpriteColor, TILE_H, TILE_W, frame_to_tile};
 use crate::core::geometry::Rect;
@@ -27,8 +29,148 @@ const WINDOW_POLL_MS: u64 = 50;
 const WINDOW_POLL_IDLE_EVERY: u32 = 5;
 
 struct OverlayHandle {
-    area: gtk4::glib::WeakRef<DrawingArea>,
+    area: gtk4::glib::WeakRef<SpriteCanvas>,
     window: gtk4::glib::WeakRef<ApplicationWindow>,
+}
+
+/// Kachel des Sprite-Sheets: Farbe, Frame, gespiegelt.
+type TileKey = (SpriteColor, u32, bool);
+
+/// Klickbares Rechteck eines Sprites (x, y, Breite, Höhe).
+type InputRect = (i32, i32, i32, i32);
+
+/// Ein auf einem Overlay platziertes Sprite (ganzzahlige Position).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Placed {
+    key: TileKey,
+    x: i32,
+    y: i32,
+    alpha: f32,
+}
+
+/// Zugeschnittene (ggf. gespiegelte) 40×40-Kacheln als Texturen. Einmal
+/// erzeugt, lädt GTK sie nur einmal auf die GPU und verwendet sie danach weiter.
+struct TileCache {
+    sheets: Vec<Option<ImageSurface>>,
+    textures: HashMap<TileKey, gdk4::Texture>,
+}
+
+impl TileCache {
+    fn new() -> Self {
+        Self {
+            sheets: SpriteColor::ALL.iter().map(|&c| load_sprite(c)).collect(),
+            textures: HashMap::new(),
+        }
+    }
+
+    fn get(&mut self, key: TileKey) -> Option<gdk4::Texture> {
+        if let Some(t) = self.textures.get(&key) {
+            return Some(t.clone());
+        }
+        let idx = SpriteColor::ALL.iter().position(|&c| c == key.0)?;
+        let tex = tile_texture(self.sheets[idx].as_ref()?, key.1, key.2)?;
+        self.textures.insert(key, tex.clone());
+        Some(tex)
+    }
+}
+
+/// Schneidet eine Kachel aus dem Sprite-Sheet und macht daraus eine Textur.
+fn tile_texture(sheet: &ImageSurface, frame: u32, mirrored: bool) -> Option<gdk4::Texture> {
+    let mut tile = ImageSurface::create(cairo::Format::ARgb32, TILE_W as i32, TILE_H as i32).ok()?;
+    {
+        let cr = cairo::Context::new(&tile).ok()?;
+        draw_tile(&cr, sheet, frame, mirrored);
+    }
+    let stride = tile.stride() as usize;
+    let data = tile.data().ok()?.to_vec();
+    // Cairo-ARGB32 liegt im Speicher als BGRA (little endian), vormultipliziert.
+    Some(
+        gdk4::MemoryTexture::new(
+            TILE_W as i32,
+            TILE_H as i32,
+            gdk4::MemoryFormat::B8g8r8a8Premultiplied,
+            &glib::Bytes::from_owned(data),
+            stride,
+        )
+        .upcast(),
+    )
+}
+
+mod canvas {
+    use super::*;
+
+    /// Zeichenfläche eines Overlays: ein Textur-Knoten pro Sprite statt
+    /// eines bildschirmgroßen Cairo-Bildes. GTK vergleicht die Render-Bäume
+    /// zweier Frames und zeichnet nur die Stellen neu, an denen sich ein
+    /// Sprite geändert hat – entsprechend wenig muss der Compositor neu
+    /// zusammensetzen.
+    #[derive(Default)]
+    pub struct SpriteCanvas {
+        pub(super) sprites: RefCell<Vec<(Placed, gdk4::Texture)>>,
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for SpriteCanvas {
+        const NAME: &'static str = "DesktopSheepCanvas";
+        type Type = super::SpriteCanvas;
+        type ParentType = gtk4::Widget;
+    }
+
+    impl ObjectImpl for SpriteCanvas {}
+
+    impl WidgetImpl for SpriteCanvas {
+        fn snapshot(&self, snapshot: &gtk4::Snapshot) {
+            // Transparente Grundfläche: Ohne einen einzigen Knoten rendert
+            // GTK das Fenster gar nicht mehr, und der letzte Frame (z. B.
+            // eines Schafs, das gerade auf den Nachbarmonitor gewechselt
+            // ist) bliebe stehen. Da sie sich nie ändert, erzeugt sie
+            // beim Frame-Vergleich keinen Schaden.
+            let w = self.obj().width() as f32;
+            let h = self.obj().height() as f32;
+            snapshot.append_color(
+                &gdk4::RGBA::TRANSPARENT,
+                &gtk4::graphene::Rect::new(0.0, 0.0, w, h),
+            );
+            for (p, tex) in self.sprites.borrow().iter() {
+                let bounds = gtk4::graphene::Rect::new(
+                    p.x as f32,
+                    p.y as f32,
+                    TILE_W as f32,
+                    TILE_H as f32,
+                );
+                let faded = p.alpha < 1.0;
+                if faded {
+                    snapshot.push_opacity(p.alpha as f64);
+                }
+                snapshot.append_texture(tex, &bounds);
+                if faded {
+                    snapshot.pop();
+                }
+            }
+        }
+    }
+}
+
+glib::wrapper! {
+    pub struct SpriteCanvas(ObjectSubclass<canvas::SpriteCanvas>) @extends gtk4::Widget;
+}
+
+impl SpriteCanvas {
+    fn new() -> Self {
+        glib::Object::new()
+    }
+
+    /// Übernimmt die Sprites dieses Overlays; neu gezeichnet wird nur, wenn
+    /// sich gegenüber dem letzten Frame etwas geändert hat.
+    fn set_sprites(&self, wanted: &[Placed], tiles: &mut TileCache) {
+        let imp = self.imp();
+        if imp.sprites.borrow().iter().map(|(p, _)| p).eq(wanted.iter()) {
+            return;
+        }
+        *imp.sprites.borrow_mut() =
+            wanted.iter().filter_map(|&p| Some((p, tiles.get(p.key)?))).collect();
+        self.queue_draw();
+    }
 }
 
 /// Zustand einer laufenden Drag-Geste.
@@ -181,10 +323,9 @@ fn build_ui<SpawnFn, TickFn>(
         return;
     }
 
-    // Alle Farbvarianten vorladen – jedes Schaf wird mit seiner eigenen
-    // gezeichnet, und die Farbe kann im Tray-Menü live wechseln.
-    let sprites: Rc<Vec<Option<ImageSurface>>> =
-        Rc::new(SpriteColor::ALL.iter().map(|&c| load_sprite(c)).collect());
+    // Jedes Schaf wird mit seiner eigenen Farbe gezeichnet; die Kacheln
+    // aller Farbvarianten entstehen bei Bedarf im TileCache.
+    let mut tiles = TileCache::new();
     for s in sheeps.borrow_mut().iter_mut() {
         settings.color.apply_to(s);
     }
@@ -233,25 +374,10 @@ fn build_ui<SpawnFn, TickFn>(
             .build();
         window.add_css_class("background");
 
-        let area = DrawingArea::new();
+        let area = SpriteCanvas::new();
         area.set_hexpand(true);
         area.set_vexpand(true);
-
-        // Draw-Func: rendert alle Sheeps, die auf DIESEM Monitor stehen.
-        let sheeps_draw = sheeps.clone();
-        let sprites_draw = sprites.clone();
         let my_idx = idx;
-        area.set_draw_func(move |_, cr, _w, _h| {
-            let all = sheeps_draw.borrow();
-            for s in all.iter().filter(|s| s.monitor_idx == my_idx) {
-                let sprite = sprite_for(&sprites_draw, s.color);
-                if let Some(p) = s.prop() {
-                    draw_tile(cr, sprite, p.frame, p.x, p.y, p.mirrored, p.alpha);
-                }
-                let mirrored = s.facing == Facing::Right;
-                draw_tile(cr, sprite, s.current_frame(), s.x, s.y, mirrored, 1.0);
-            }
-        });
 
         // Drag-Geste anhängen. Root-Koordinaten damit das Sheep über die
         // Monitor-Grenze gezogen werden kann (Pointer-Grab bleibt bei diesem
@@ -382,6 +508,8 @@ fn build_ui<SpawnFn, TickFn>(
     let overlays_tick = overlays.clone();
     let surfaces_tick = surfaces.clone();
     let last = Rc::new(RefCell::new(Instant::now()));
+    // Zuletzt gesetzte Input-Region je Overlay – nur bei Änderung neu setzen.
+    let mut last_input: Vec<Option<Vec<InputRect>>> = vec![None; mons.len()];
     glib::timeout_add_local(std::time::Duration::from_millis(tick_ms as u64), move || {
         let now = Instant::now();
         let dt = now.duration_since(*last.borrow()).as_millis() as u32;
@@ -400,23 +528,46 @@ fn build_ui<SpawnFn, TickFn>(
             (tick_cb.borrow_mut())(&mut *s, dt.max(1), &world);
         }
 
-        // Input-Region pro Overlay aus Sprite-Bboxes bauen und setzen –
-        // nur der Sprite-Bereich ist klick-/dragbar, Rest bleibt durchlässig.
+        // Pro Overlay Sprites und Input-Region aktualisieren – beides nur,
+        // wenn sich etwas geändert hat. Nur der Sprite-Bereich ist klick-/
+        // dragbar, der Rest bleibt durchlässig.
         {
             let all = sheeps_tick.borrow();
             for (idx, oh) in overlays_tick.borrow().iter().enumerate() {
+                let here = || all.iter().filter(|s| s.monitor_idx == idx);
+                if let Some(a) = oh.area.upgrade() {
+                    let mut wanted = Vec::new();
+                    for s in here() {
+                        if let Some(p) = s.prop() {
+                            wanted.push(Placed {
+                                key: (s.color, p.frame, p.mirrored),
+                                x: p.x.round() as i32,
+                                y: p.y.round() as i32,
+                                alpha: p.alpha,
+                            });
+                        }
+                        wanted.push(Placed {
+                            key: (s.color, s.current_frame(), s.facing == Facing::Right),
+                            x: s.x.round() as i32,
+                            y: s.y.round() as i32,
+                            alpha: 1.0,
+                        });
+                    }
+                    a.set_sprites(&wanted, &mut tiles);
+                }
+
+                let input: Vec<_> = here().map(|s| s.hitbox()).collect();
+                if last_input[idx].as_ref() == Some(&input) {
+                    continue;
+                }
                 let Some(win) = oh.window.upgrade() else { continue };
                 let Some(surface) = win.native().and_then(|n| n.surface()) else { continue };
                 let region = cairo::Region::create();
-                for s in all.iter().filter(|s| s.monitor_idx == idx) {
-                    let (bx, by, bw, bh) = s.hitbox();
-                    let rect = cairo::RectangleInt::new(bx, by, bw, bh);
-                    region.union_rectangle(&rect).ok();
+                for &(bx, by, bw, bh) in &input {
+                    region.union_rectangle(&cairo::RectangleInt::new(bx, by, bw, bh)).ok();
                 }
                 surface.set_input_region(&region);
-                if let Some(a) = oh.area.upgrade() {
-                    a.queue_draw();
-                }
+                last_input[idx] = Some(input);
             }
         }
         glib::ControlFlow::Continue
@@ -583,34 +734,20 @@ fn start_window_poller(
     });
 }
 
-/// Zeichnet eine Kachel des Sprite-Sheets an (x, y). Die Kacheln schauen
+/// Zeichnet eine Kachel des Sprite-Sheets an (0, 0). Die Kacheln schauen
 /// nach links; `mirrored` spiegelt horizontal.
-fn draw_tile(
-    cr: &cairo::Context,
-    sprite: &Option<ImageSurface>,
-    frame: u32,
-    x: f32,
-    y: f32,
-    mirrored: bool,
-    alpha: f32,
-) {
-    let Some(img) = sprite else { return };
+fn draw_tile(cr: &cairo::Context, sheet: &ImageSurface, frame: u32, mirrored: bool) {
     let (col, row) = frame_to_tile(frame);
     let sx = (col * TILE_W) as f64;
     let sy = (row * TILE_H) as f64;
-
-    cr.save().ok();
     if mirrored {
-        cr.translate(x as f64 + TILE_W as f64, y as f64);
+        cr.translate(TILE_W as f64, 0.0);
         cr.scale(-1.0, 1.0);
-    } else {
-        cr.translate(x as f64, y as f64);
     }
-    cr.set_source_surface(img, -sx, -sy).ok();
+    cr.set_source_surface(sheet, -sx, -sy).ok();
     cr.rectangle(0.0, 0.0, TILE_W as f64, TILE_H as f64);
     cr.clip();
-    cr.paint_with_alpha(alpha as f64).ok();
-    cr.restore().ok();
+    cr.paint().ok();
 }
 
 struct PointerPoller {
@@ -916,12 +1053,6 @@ fn start_tray_service(settings: Settings) -> mpsc::Receiver<TrayCmd> {
     let service = ksni::TrayService::new(tray);
     service.spawn();
     rx
-}
-
-/// Vorgeladenes Sprite-Sheet einer Farbvariante (Reihenfolge wie `SpriteColor::ALL`).
-fn sprite_for(sprites: &[Option<ImageSurface>], color: SpriteColor) -> &Option<ImageSurface> {
-    let idx = SpriteColor::ALL.iter().position(|&c| c == color).unwrap_or(0);
-    &sprites[idx]
 }
 
 fn load_sprite(color: SpriteColor) -> Option<ImageSurface> {
