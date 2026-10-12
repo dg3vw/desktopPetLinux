@@ -5,7 +5,8 @@ use std::path::PathBuf;
 
 use crate::settings::config_home;
 
-const ICON_PNG: &[u8] = include_bytes!("../packaging/desktop_sheep.png");
+/// Programm-Icon (48×48), auch für das Tray-Icon verwendet.
+pub const ICON_PNG: &[u8] = include_bytes!("../packaging/desktop_sheep.png");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DesktopFile {

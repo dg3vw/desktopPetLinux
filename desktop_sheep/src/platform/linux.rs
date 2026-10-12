@@ -16,7 +16,7 @@ use crate::core::geometry::Rect;
 use crate::core::sheep::{Facing, Sheep};
 use crate::core::surfaces::{walkable_surfaces, Surface};
 use crate::core::world::World;
-use crate::desktop_files::DesktopFile;
+use crate::desktop_files::{DesktopFile, ICON_PNG};
 use crate::platform::x11_windows;
 use crate::platform::Platform;
 use crate::settings::{ColorChoice, Settings};
@@ -918,6 +918,8 @@ fn color_label(c: ColorChoice) -> &'static str {
 struct DesktopSheepTray {
     settings: Settings,
     tx: mpsc::Sender<TrayCmd>,
+    /// Schaf-Icon in mehreren Größen (ARGB), einmal beim Start erzeugt.
+    icons: Vec<ksni::Icon>,
 }
 
 impl DesktopSheepTray {
@@ -941,9 +943,10 @@ impl DesktopSheepTray {
 }
 
 impl ksni::Tray for DesktopSheepTray {
-    fn icon_name(&self) -> String {
-        // Standardsymbol aus dem Icon-Theme – kein Custom-Icon nötig.
-        "face-smile".into()
+    // Als Pixeldaten statt Theme-Name: braucht kein installiertes Icon und
+    // funktioniert so auch direkt aus dem AppImage.
+    fn icon_pixmap(&self) -> Vec<ksni::Icon> {
+        self.icons.clone()
     }
     fn title(&self) -> String {
         "Desktop Sheep".into()
@@ -952,8 +955,8 @@ impl ksni::Tray for DesktopSheepTray {
         ksni::ToolTip {
             title: "Desktop Sheep".into(),
             description: "Overlay-Schafe laufen an der Bildschirmunterkante".into(),
-            icon_name: "face-smile".into(),
-            icon_pixmap: Vec::new(),
+            icon_name: String::new(),
+            icon_pixmap: self.icons.clone(),
         }
     }
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
@@ -1049,10 +1052,49 @@ fn desktop_file_item(label: &str, file: DesktopFile) -> ksni::MenuItem<DesktopSh
 /// kommen über den zurückgegebenen Kanal beim GTK-Loop an.
 fn start_tray_service(settings: Settings) -> mpsc::Receiver<TrayCmd> {
     let (tx, rx) = mpsc::channel();
-    let tray = DesktopSheepTray { settings, tx };
+    let tray = DesktopSheepTray { settings, tx, icons: tray_icons() };
     let service = ksni::TrayService::new(tray);
     service.spawn();
     rx
+}
+
+/// Größen, in denen das Tray-Icon angeboten wird; das Panel wählt die
+/// passende, statt selbst (unscharf) zu skalieren.
+const TRAY_ICON_SIZES: [i32; 5] = [16, 22, 24, 32, 48];
+
+/// Das Programm-Icon als ARGB32-Pixmaps (Netzwerk-Byte-Reihenfolge, nicht
+/// vormultipliziert), wie es das StatusNotifierItem-Protokoll verlangt.
+fn tray_icons() -> Vec<ksni::Icon> {
+    let Ok(src) = ImageSurface::create_from_png(&mut std::io::Cursor::new(ICON_PNG)) else {
+        eprintln!("Tray-Icon konnte nicht geladen werden.");
+        return Vec::new();
+    };
+    TRAY_ICON_SIZES
+        .iter()
+        .filter_map(|&size| {
+            let mut img = ImageSurface::create(cairo::Format::ARgb32, size, size).ok()?;
+            {
+                let cr = cairo::Context::new(&img).ok()?;
+                let scale = size as f64 / src.width() as f64;
+                cr.scale(scale, scale);
+                cr.set_source_surface(&src, 0.0, 0.0).ok()?;
+                cr.source().set_filter(cairo::Filter::Good);
+                cr.paint().ok()?;
+            }
+            let stride = img.stride() as usize;
+            let data = img.data().ok()?;
+            let mut argb = Vec::with_capacity((size * size * 4) as usize);
+            for row in data.chunks(stride).take(size as usize) {
+                for px in row[..size as usize * 4].chunks_exact(4) {
+                    // Cairo: u32 in nativer Byte-Reihenfolge, vormultipliziert.
+                    let [b, g, r, a] = u32::from_ne_bytes([px[0], px[1], px[2], px[3]]).to_le_bytes();
+                    let unmul = |c: u8| if a == 0 { 0 } else { (c as u32 * 255 / a as u32) as u8 };
+                    argb.extend_from_slice(&[a, unmul(r), unmul(g), unmul(b)]);
+                }
+            }
+            Some(ksni::Icon { width: size, height: size, data: argb })
+        })
+        .collect()
 }
 
 fn load_sprite(color: SpriteColor) -> Option<ImageSurface> {
