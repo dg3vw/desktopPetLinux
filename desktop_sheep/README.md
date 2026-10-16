@@ -46,7 +46,7 @@ Abhängigkeiten (Debian/LMDE):
 sudo apt install build-essential pkg-config libgtk-4-dev libx11-dev libdbus-1-dev
 ```
 
-Rust ≥ 1.80 über [rustup](https://rustup.rs). Dann:
+Rust ≥ 1.85 über [rustup](https://rustup.rs). Dann:
 
 ```sh
 cargo build --release

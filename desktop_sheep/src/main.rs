@@ -118,7 +118,7 @@ fn run_overlay(settings: Settings) {
     let base_seed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0xDEAD_BEEF_C0FFEE);
+        .unwrap_or(0x00DE_ADBE_EFC0_FFEE);
     let mut spawned: u64 = 0;
     let mut spawn = move |i: usize| {
         let monitor_idx = i % n_monitors;

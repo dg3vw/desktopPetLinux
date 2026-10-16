@@ -1,8 +1,6 @@
 //! Animations-Tabelle (aus Pets/esheep64/animations.xml abgeleitet, vereinfacht).
 
 pub const TILES_X: u32 = 16;
-#[allow(dead_code)]
-pub const TILES_Y: u32 = 11;
 pub const TILE_W: u32 = 40;
 pub const TILE_H: u32 = 40;
 

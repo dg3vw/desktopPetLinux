@@ -13,11 +13,11 @@ pub trait Platform {
     /// Der `tick`-Callback wird periodisch aufgerufen und darf die Sheep-Zustände
     /// mutieren; der Renderer liest sie danach zum Zeichnen.
     /// `tick`-Signatur: (&mut [Sheep], dt_ms, world).
-    /// `world.area_dims[i] = (width, height)` der i-ten Overlay-DrawingArea,
+    /// `world.area_dims[i] = (width, height)` der i-ten Overlay-Zeichenfläche,
     /// in derselben Reihenfolge wie `monitor_geometry()`. Kann kleiner sein
     /// als das theoretische Monitorrechteck (Panels, WM-Struts) – deshalb
     /// authoritativ für Wenden/Boden. `world.surfaces[i]` sind die
-    /// begehbaren Fensterkanten auf diesem Overlay (Plan Abschnitt 6).
+    /// begehbaren Fensterkanten auf diesem Overlay.
     /// `spawn(i)` erzeugt Schaf Nr. `i`, wenn die Anzahl zur Laufzeit
     /// (Tray-Menü) erhöht wird.
     fn run<SpawnFn, TickFn>(

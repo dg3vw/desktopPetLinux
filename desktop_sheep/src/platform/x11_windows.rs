@@ -1,4 +1,4 @@
-//! Fensterliste per EWMH (Plan Abschnitt 6.2).
+//! Fensterliste per EWMH.
 //!
 //! Liest `_NET_CLIENT_LIST_STACKING` und liefert die sichtbaren fremden
 //! Top-Level-Fenster des aktuellen Arbeitsbereichs in Stapelreihenfolge
@@ -82,7 +82,7 @@ unsafe fn get_u32_list(d: *mut xlib::Display, w: xlib::Window, prop: xlib::Atom)
     }
     let out = if actual_format == 32 {
         let longs = std::slice::from_raw_parts(data as *const c_ulong, nitems as usize);
-        Some(longs.iter().map(|&v| v as u64).collect())
+        Some(longs.to_vec())
     } else {
         None
     };
@@ -139,12 +139,12 @@ pub unsafe fn list_windows(d: *mut xlib::Display, a: &Atoms) -> Vec<WindowRect> 
         }
         // nemo-desktop (bildschirmfüllend, Oberkante y=0) und Panels.
         if let Some(types) = get_u32_list(d, w, a.wm_window_type) {
-            if types.iter().any(|&t| t == a.type_desktop as u64 || t == a.type_dock as u64) {
+            if types.iter().any(|&t| t == a.type_desktop || t == a.type_dock) {
                 continue;
             }
         }
         if let Some(states) = get_u32_list(d, w, a.wm_state) {
-            if states.iter().any(|&s| s == a.state_hidden as u64) {
+            if states.contains(&a.state_hidden) {
                 continue;
             }
         }

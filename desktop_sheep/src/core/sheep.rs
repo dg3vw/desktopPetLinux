@@ -199,13 +199,13 @@ impl Sheep {
 
     /// True, solange das Schaf in irgendeinem Schlaf-Loop steckt
     /// (klassisches Liegen oder Sitzen/Dösen).
-    #[allow(dead_code)] // API für spätere UI/Debug-Anzeige
+    #[cfg(test)]
     pub fn is_sleeping(&self) -> bool {
         matches!(self.anim, AnimId::Sleep | AnimId::Sleep2 | AnimId::Sleep3)
     }
 
     /// Fenster, auf dem das Schaf gerade steht (`None` = Boden oder in der Luft).
-    #[allow(dead_code)] // für Tests und Debug-Ausgabe
+    #[cfg(test)]
     pub fn support_window(&self) -> Option<WindowId> {
         self.support
     }
@@ -889,7 +889,7 @@ impl Sheep {
             let sy = s.y as f32;
             let crossed = prev_bottom <= sy + 0.5 && new_bottom >= sy;
             let under = cx >= s.x_start as f32 && cx <= s.x_end as f32;
-            if crossed && under && hit.map_or(true, |(hy, _)| sy < hy) {
+            if crossed && under && hit.is_none_or(|(hy, _)| sy < hy) {
                 hit = Some((sy, Some(*s)));
             }
         }

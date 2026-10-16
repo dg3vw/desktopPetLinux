@@ -497,7 +497,6 @@ fn build_ui<SpawnFn, TickFn>(
                 if let Some(win) = window_focus.upgrade() {
                     apply_overlay_wm_state(&win);
                 }
-                let _ = w;
             }
         });
     }
@@ -525,7 +524,7 @@ fn build_ui<SpawnFn, TickFn>(
             let mut s = sheeps_tick.borrow_mut();
             let surf = surfaces_tick.borrow();
             let world = World { area_dims: &dims, surfaces: &surf };
-            (tick_cb.borrow_mut())(&mut *s, dt.max(1), &world);
+            (tick_cb.borrow_mut())(&mut s, dt.max(1), &world);
         }
 
         // Pro Overlay Sprites und Input-Region aktualisieren – beides nur,
@@ -573,8 +572,7 @@ fn build_ui<SpawnFn, TickFn>(
         glib::ControlFlow::Continue
     });
 
-    // Fensteroberkanten als Laufflächen (Plan Abschnitt 6); im Tray-Menü
-    // abschaltbar.
+    // Fensteroberkanten als Laufflächen; im Tray-Menü abschaltbar.
     let walk_on_windows = Rc::new(Cell::new(settings.walk_on_windows));
     start_window_poller(overlays.clone(), surfaces.clone(), walk_on_windows.clone());
 
@@ -680,7 +678,7 @@ fn start_window_poller(
         x11display.error_trap_push();
         let windows = unsafe { x11_windows::list_windows(xdisp, &atoms) };
         // Root-Rechteck jeder Overlay-Zeichenfläche: tatsächliche Fenster-
-        // position (der WM kann verschieben) + Live-Größe der DrawingArea.
+        // position (der WM kann verschieben) + Live-Größe der Zeichenfläche.
         let overlay_rects: Vec<Rect> = overlays
             .borrow()
             .iter()

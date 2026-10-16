@@ -1,4 +1,4 @@
-//! Begehbare Fensteroberkanten (Plan Abschnitt 6.1).
+//! Begehbare Fensteroberkanten.
 //!
 //! Das Backend liefert die sichtbaren Top-Level-Fenster in Stapelreihenfolge
 //! (unten → oben) in Root-Koordinaten. Daraus wird pro Overlay/Monitor eine

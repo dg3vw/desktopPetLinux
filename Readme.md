@@ -1,5 +1,10 @@
 # Desktop Pet (eSheep)
 
+> **Linux-Port:** Dieses Repo ist ein Fork von
+> [Adrianotiger/desktopPet](https://github.com/Adrianotiger/desktopPet). Die
+> Rust/GTK4-Portierung für Linux (X11) liegt in [`desktop_sheep/`](desktop_sheep/README.md).
+> Alles andere ist der unveränderte Windows-Upstream.
+
 Can you remember eSheep, the lovely desktop sheep?
 <img src='src/Images/esheep.png' /><br />
 If you had a lot of them on the desktop... welcome to this page!<br />
