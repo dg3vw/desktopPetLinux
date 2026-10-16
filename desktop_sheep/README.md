@@ -131,8 +131,10 @@ packaging/           AppImage-Skript, .desktop, Icon
 
 ## Sprites / Lizenz
 
-Die Sprite-Sheets stammen aus dem Upstream-Projekt
-[Adrianotiger/desktopPet](https://github.com/Adrianotiger/desktopPet)
-(`Pets/esheep64` bzw. die gSheep-Farbvarianten; laut dortigem README
-„sprites from LiL_Stenly“). Vor einer Weiterverbreitung die Lizenzlage
-im Upstream-Repo prüfen.
+Wie das Upstream-Projekt
+[Adrianotiger/desktopPet](https://github.com/Adrianotiger/desktopPet) steht
+dieses Repo unter der MIT-Lizenz, siehe [`LICENSE.md`](../LICENSE.md).
+
+Die Sprite-Sheets stammen aus dem Upstream-Projekt (`Pets/esheep64` bzw.
+die gSheep-Farbvarianten; laut dortigem README „sprites from LiL_Stenly“)
+und werden dort unter dieser Lizenz verbreitet.

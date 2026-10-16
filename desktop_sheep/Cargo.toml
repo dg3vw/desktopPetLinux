@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Desktop-Schaf: transparentes Overlay-Sheep an der Bildschirmunterkante (Linux/X11, gtk4-rs)"
+license = "MIT"
 
 [dependencies]
 gtk4 = { version = "0.9", features = ["v4_14"] }
