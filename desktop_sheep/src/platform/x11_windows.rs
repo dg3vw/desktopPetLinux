@@ -57,7 +57,11 @@ const ALL_DESKTOPS: u64 = 0xFFFF_FFFF;
 
 /// Liest eine Property im 32-Bit-Format (CARDINAL, WINDOW, ATOM, …).
 /// Xlib liefert Format-32-Daten als `long`-Array, auch auf 64-Bit-Systemen.
-unsafe fn get_u32_list(d: *mut xlib::Display, w: xlib::Window, prop: xlib::Atom) -> Option<Vec<u64>> {
+unsafe fn get_u32_list(
+    d: *mut xlib::Display,
+    w: xlib::Window,
+    prop: xlib::Atom,
+) -> Option<Vec<u64>> {
     let mut actual_type: xlib::Atom = 0;
     let mut actual_format: c_int = 0;
     let mut nitems: c_ulong = 0;
@@ -91,7 +95,11 @@ unsafe fn get_u32_list(d: *mut xlib::Display, w: xlib::Window, prop: xlib::Atom)
 }
 
 /// Vier Ränder (links, rechts, oben, unten) aus einer Extents-Property.
-unsafe fn get_extents(d: *mut xlib::Display, w: xlib::Window, prop: xlib::Atom) -> (i32, i32, i32, i32) {
+unsafe fn get_extents(
+    d: *mut xlib::Display,
+    w: xlib::Window,
+    prop: xlib::Atom,
+) -> (i32, i32, i32, i32) {
     match get_u32_list(d, w, prop) {
         Some(v) if v.len() >= 4 => (v[0] as i32, v[1] as i32, v[2] as i32, v[3] as i32),
         _ => (0, 0, 0, 0),
@@ -114,8 +122,7 @@ pub unsafe fn root_origin(d: *mut xlib::Display, w: xlib::Window) -> Option<(i32
 pub unsafe fn list_windows(d: *mut xlib::Display, a: &Atoms) -> Vec<WindowRect> {
     let root = xlib::XDefaultRootWindow(d);
     let own_pid = std::process::id() as u64;
-    let current_desktop = get_u32_list(d, root, a.current_desktop)
-        .and_then(|v| v.first().copied());
+    let current_desktop = get_u32_list(d, root, a.current_desktop).and_then(|v| v.first().copied());
     let Some(clients) = get_u32_list(d, root, a.client_list_stacking) else {
         return Vec::new();
     };
@@ -139,7 +146,10 @@ pub unsafe fn list_windows(d: *mut xlib::Display, a: &Atoms) -> Vec<WindowRect> 
         }
         // nemo-desktop (bildschirmfüllend, Oberkante y=0) und Panels.
         if let Some(types) = get_u32_list(d, w, a.wm_window_type) {
-            if types.iter().any(|&t| t == a.type_desktop || t == a.type_dock) {
+            if types
+                .iter()
+                .any(|&t| t == a.type_desktop || t == a.type_dock)
+            {
                 continue;
             }
         }
@@ -156,7 +166,9 @@ pub unsafe fn list_windows(d: *mut xlib::Display, a: &Atoms) -> Vec<WindowRect> 
         if attrs.map_state != xlib::IsViewable {
             continue;
         }
-        let Some((cx, cy)) = root_origin(d, w) else { continue };
+        let Some((cx, cy)) = root_origin(d, w) else {
+            continue;
+        };
 
         // Client-Bereich → um WM-Rahmen (Titelleiste) erweitern …
         let (fl, fr, ft, fb) = get_extents(d, w, a.frame_extents);
@@ -180,7 +192,9 @@ pub unsafe fn list_windows(d: *mut xlib::Display, a: &Atoms) -> Vec<WindowRect> 
 pub unsafe fn window_name(d: *mut xlib::Display, w: xlib::Window) -> String {
     let mut name: *mut std::os::raw::c_char = std::ptr::null_mut();
     if xlib::XFetchName(d, w, &mut name) != 0 && !name.is_null() {
-        let s = std::ffi::CStr::from_ptr(name).to_string_lossy().into_owned();
+        let s = std::ffi::CStr::from_ptr(name)
+            .to_string_lossy()
+            .into_owned();
         xlib::XFree(name as *mut _);
         s
     } else {

@@ -212,20 +212,12 @@ impl Sheep {
 
     /// Aktuelle Sprite-Bounding-Box in Overlay-lokalen Koordinaten.
     pub fn hitbox(&self) -> (i32, i32, i32, i32) {
-        (
-            self.x as i32,
-            self.y as i32,
-            TILE_W as i32,
-            TILE_H as i32,
-        )
+        (self.x as i32, self.y as i32, TILE_W as i32, TILE_H as i32)
     }
 
     /// Trefft der Punkt (mx, my) das Sprite?
     pub fn contains(&self, mx: f32, my: f32) -> bool {
-        mx >= self.x
-            && mx < self.x + TILE_W as f32
-            && my >= self.y
-            && my < self.y + TILE_H as f32
+        mx >= self.x && mx < self.x + TILE_W as f32 && my >= self.y && my < self.y + TILE_H as f32
     }
 
     /// Bricht den Schlaf-Loop ab und wechselt sofort zur WakeUp-Animation.
@@ -433,7 +425,11 @@ impl Sheep {
         self.leaving = false;
         self.prop = None;
         self.prop_ttl_ms = None;
-        self.facing = if from_right { Facing::Left } else { Facing::Right };
+        self.facing = if from_right {
+            Facing::Left
+        } else {
+            Facing::Right
+        };
 
         match entry {
             Entry::Bath if (aw - TILE_W as i32).min(ah - TILE_H as i32) >= 240 => {
@@ -441,7 +437,11 @@ impl Sheep {
                 // Bildrands und fliegt im 45°-Winkel genau hinein.
                 let d_max = (aw - TILE_W as i32).min(ah - TILE_H as i32) as u32;
                 let d = (200 + self.rng.range(d_max - 200 + 1)) as f32;
-                let x0 = if from_right { aw as f32 } else { -(TILE_W as f32) };
+                let x0 = if from_right {
+                    aw as f32
+                } else {
+                    -(TILE_W as f32)
+                };
                 let tub_x = x0 + self.forward() * d;
                 self.x = x0;
                 self.y = floor - d;
@@ -460,7 +460,11 @@ impl Sheep {
                 // kommt spiegelbildlich von der anderen Seite.
                 let jitter = self.rng.range((aw / 3).max(1) as u32) as f32 - aw as f32 / 6.0;
                 self.meet_x = aw as f32 / 2.0 + jitter;
-                self.x = if from_right { aw as f32 } else { -(TILE_W as f32) };
+                self.x = if from_right {
+                    aw as f32
+                } else {
+                    -(TILE_W as f32)
+                };
                 self.y = floor;
                 self.prop = Some(Prop {
                     x: 0.0,
@@ -535,7 +539,11 @@ impl Sheep {
         let Some(p) = self.prop.as_mut() else { return };
         match p.kind {
             PropKind::Tub => {
-                p.frame = if anim == AnimId::BathSoak { 147 + (idx % 2) as u32 } else { 146 };
+                p.frame = if anim == AnimId::BathSoak {
+                    147 + (idx % 2) as u32
+                } else {
+                    146
+                };
             }
             PropKind::BlackSheep => {
                 p.frame = match anim {
@@ -545,7 +553,10 @@ impl Sheep {
                 };
                 // Spiegelbildlich zum weißen Schaf, bis es nach dem Erröten
                 // weiterläuft – dann bleibt das schwarze stehen und verblasst.
-                if matches!(anim, AnimId::VisitRun | AnimId::VisitWalk | AnimId::VisitBlush) {
+                if matches!(
+                    anim,
+                    AnimId::VisitRun | AnimId::VisitWalk | AnimId::VisitBlush
+                ) {
                     p.x = 2.0 * meet - TILE_W as f32 - white_x;
                 }
                 p.alpha = ttl.map_or(1.0, |t| (t as f32 / FADE_MS as f32).min(1.0));
@@ -559,7 +570,11 @@ impl Sheep {
     }
 
     fn forward(&self) -> f32 {
-        if self.facing == Facing::Right { 1.0 } else { -1.0 }
+        if self.facing == Facing::Right {
+            1.0
+        } else {
+            -1.0
+        }
     }
 
     /// Wechselt in eine neue Animation und löst deren Eintritts-Effekte aus.
@@ -643,14 +658,16 @@ impl Sheep {
     /// Schaf gerade an der Kante, reicht es, wenn die Kante in Reichweite ist.
     fn find_support(&self, window: WindowId, world: &World) -> Option<Surface> {
         let cx = self.x + TILE_W as f32 / 2.0;
-        let tol = if self.hang_offset > 0.0 { TILE_W as f32 } else { 0.0 };
+        let tol = if self.hang_offset > 0.0 {
+            TILE_W as f32
+        } else {
+            0.0
+        };
         world
             .surfaces(self.monitor_idx)
             .iter()
             .find(|s| {
-                s.window == window
-                    && cx >= s.x_start as f32 - tol
-                    && cx <= s.x_end as f32 + tol
+                s.window == window && cx >= s.x_start as f32 - tol && cx <= s.x_end as f32 + tol
             })
             .copied()
     }
@@ -691,10 +708,18 @@ impl Sheep {
         }
         let next = match self.anim {
             AnimId::Run | AnimId::RunBegin | AnimId::RunEnd => {
-                if self.rng.range(2) == 0 { AnimId::JumpDown } else { AnimId::Rotate1A }
+                if self.rng.range(2) == 0 {
+                    AnimId::JumpDown
+                } else {
+                    AnimId::Rotate1A
+                }
             }
             _ => {
-                if self.rng.range(100) < 60 { AnimId::LookDown } else { AnimId::Rotate1A }
+                if self.rng.range(100) < 60 {
+                    AnimId::LookDown
+                } else {
+                    AnimId::Rotate1A
+                }
             }
         };
         self.set_anim(next);
@@ -744,7 +769,11 @@ impl Sheep {
         let (aw, ah) = world.dims(self.monitor_idx);
         let up = self.anim != AnimId::ClimbDown;
         let wall_left = (self.facing == Facing::Left) == up;
-        self.x = if wall_left { 0.0 } else { (aw - TILE_W as i32).max(0) as f32 };
+        self.x = if wall_left {
+            0.0
+        } else {
+            (aw - TILE_W as i32).max(0) as f32
+        };
         let floor = (ah - TILE_H as i32).max(0) as f32;
         let dy = CLIMB_PX_PER_TICK * SPEED_SCALE * (dt_ms as f32 / 16.0);
         match self.anim {
@@ -804,7 +833,11 @@ impl Sheep {
             AnimId::Walk => self.rng.range(4) == 0,
             _ => false,
         };
-        self.set_anim(if ram { AnimId::WallRam } else { AnimId::Rotate1A });
+        self.set_anim(if ram {
+            AnimId::WallRam
+        } else {
+            AnimId::Rotate1A
+        });
     }
 
     /// Nach dem Rauslaufen neu auftreten: meist von oben, gelegentlich als
@@ -927,7 +960,10 @@ impl Sheep {
             && !self.leaving
             && self.pending_entry.is_none()
             && self.hang_offset == 0.0
-            && matches!(self.anim, AnimId::Walk | AnimId::RunBegin | AnimId::Run | AnimId::RunEnd)
+            && matches!(
+                self.anim,
+                AnimId::Walk | AnimId::RunBegin | AnimId::Run | AnimId::RunEnd
+            )
     }
 
     /// Wie weit `other` in Laufrichtung vor diesem Schaf auf derselben
@@ -975,9 +1011,7 @@ impl Sheep {
             AnimId::Run | AnimId::RunBegin => LEAP_PERCENT_RUN,
             _ => LEAP_PERCENT_WALK,
         };
-        let leap = !other_jumping
-            && self.rng.range(100) < leap_percent
-            && self.room_to_leap(world);
+        let leap = !other_jumping && self.rng.range(100) < leap_percent && self.room_to_leap(world);
         self.set_anim(if leap { AnimId::Jump } else { AnimId::Rotate1A });
     }
 
@@ -993,7 +1027,9 @@ impl Sheep {
         match dir {
             Facing::Right => {
                 let next_idx = self.monitor_idx + 1;
-                let Some(next) = segments.get(next_idx) else { return false };
+                let Some(next) = segments.get(next_idx) else {
+                    return false;
+                };
                 if (next.x_start - cur.x_end).abs() > KANTE_TOLERANZ {
                     return false;
                 }
@@ -1054,10 +1090,21 @@ mod tests {
     use super::*;
 
     const DIMS: [(i32, i32); 1] = [(1920, 1080)];
-    const SEGS: [GroundSegment; 1] = [GroundSegment { x_start: 0, x_end: 1920, y: 1080 }];
+    const SEGS: [GroundSegment; 1] = [GroundSegment {
+        x_start: 0,
+        x_end: 1920,
+        y: 1080,
+    }];
 
     fn surface(window: WindowId, x_start: i32, x_end: i32, y: i32) -> Surface {
-        Surface { window, x_start, x_end, y, win_x: x_start, win_right: x_end }
+        Surface {
+            window,
+            x_start,
+            x_end,
+            y,
+            win_x: x_start,
+            win_right: x_end,
+        }
     }
 
     /// Tickt, bis das Schaf nicht mehr fällt (max. 10 s Simulationszeit).
@@ -1078,7 +1125,10 @@ mod tests {
     #[test]
     fn lands_on_window_below() {
         let surfaces = vec![vec![surface(1, 100, 900, 300)]];
-        let world = World { area_dims: &DIMS, surfaces: &surfaces };
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &surfaces,
+        };
         let mut s = Sheep::new_at(0, 400.0, 42);
         tick_until_landed(&mut s, &world, 16);
         assert_eq!(s.support_window(), Some(1));
@@ -1089,7 +1139,10 @@ mod tests {
     fn fast_fall_does_not_tunnel_through_edge() {
         // 100-ms-Ticks: das Schaf legt am Ende >200 px pro Tick zurück.
         let surfaces = vec![vec![surface(1, 100, 900, 900)]];
-        let world = World { area_dims: &DIMS, surfaces: &surfaces };
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &surfaces,
+        };
         let mut s = Sheep::new_at(0, 400.0, 7);
         tick_until_landed(&mut s, &world, 100);
         assert_eq!(s.support_window(), Some(1));
@@ -1098,7 +1151,10 @@ mod tests {
     #[test]
     fn misses_window_when_center_is_outside() {
         let surfaces = vec![vec![surface(1, 100, 300, 500)]];
-        let world = World { area_dims: &DIMS, surfaces: &surfaces };
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &surfaces,
+        };
         let mut s = Sheep::new_at(0, 600.0, 1);
         tick_until_landed(&mut s, &world, 16);
         assert_eq!(s.support_window(), None);
@@ -1108,7 +1164,10 @@ mod tests {
     /// Landet das Schaf auf Fenster 1 bei x=400 und liefert es zurück.
     fn landed_on_window() -> Sheep {
         let surfaces = vec![vec![surface(1, 100, 900, 300)]];
-        let world = World { area_dims: &DIMS, surfaces: &surfaces };
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &surfaces,
+        };
         let mut s = Sheep::new_at(0, 400.0, 3);
         tick_until_landed(&mut s, &world, 16);
         assert_eq!(s.support_window(), Some(1));
@@ -1122,7 +1181,14 @@ mod tests {
         // Fenster um 50 px nach rechts, Schaf steht noch drauf. Landeanimationen
         // haben dx=0 – das Schaf bleibt also exakt stehen.
         let moved = vec![vec![surface(1, 150, 950, 300)]];
-        s.tick(16, &SEGS, &World { area_dims: &DIMS, surfaces: &moved });
+        s.tick(
+            16,
+            &SEGS,
+            &World {
+                area_dims: &DIMS,
+                surfaces: &moved,
+            },
+        );
         assert_eq!(s.x, x0);
         assert_eq!(s.support_window(), Some(1));
     }
@@ -1131,7 +1197,14 @@ mod tests {
     fn window_pushed_up_lifts_sheep() {
         let mut s = landed_on_window();
         let up = vec![vec![surface(1, 100, 900, 250)]];
-        s.tick(16, &SEGS, &World { area_dims: &DIMS, surfaces: &up });
+        s.tick(
+            16,
+            &SEGS,
+            &World {
+                area_dims: &DIMS,
+                surfaces: &up,
+            },
+        );
         assert_eq!(s.y + TILE_H as f32, 250.0);
         assert_eq!(s.support_window(), Some(1));
     }
@@ -1142,7 +1215,10 @@ mod tests {
         let y0 = s.y;
         // Fenster komplett nach rechts weggezogen.
         let away = vec![vec![surface(1, 700, 1500, 300)]];
-        let world = World { area_dims: &DIMS, surfaces: &away };
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &away,
+        };
         s.tick(16, &SEGS, &world);
         assert_eq!(s.anim, AnimId::Surprised);
         assert_eq!(s.support_window(), None);
@@ -1163,7 +1239,10 @@ mod tests {
     fn window_dropped_down_sheep_falls_after_it() {
         let mut s = landed_on_window();
         let down = vec![vec![surface(1, 100, 900, 500)]];
-        let world = World { area_dims: &DIMS, surfaces: &down };
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &down,
+        };
         s.tick(16, &SEGS, &world);
         assert_eq!(s.anim, AnimId::Surprised);
         tick_until_landed(&mut s, &world, 16);
@@ -1175,7 +1254,10 @@ mod tests {
     fn window_vanishes_sheep_falls() {
         let mut s = landed_on_window();
         let empty: Vec<Vec<Surface>> = vec![vec![]];
-        let world = World { area_dims: &DIMS, surfaces: &empty };
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &empty,
+        };
         s.tick(16, &SEGS, &world);
         assert_eq!(s.anim, AnimId::Surprised);
         tick_until_landed(&mut s, &world, 16);
@@ -1185,7 +1267,10 @@ mod tests {
     /// Schaf auf dem Boden an der linken Wand, kurz vorm Hochklettern.
     fn at_left_wall_climbing(seed: u64) -> Sheep {
         let none: Vec<Vec<Surface>> = vec![vec![]];
-        let world = World { area_dims: &DIMS, surfaces: &none };
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &none,
+        };
         let mut s = Sheep::new_at(0, 0.0, seed);
         tick_until_landed(&mut s, &world, 16);
         s.facing = Facing::Left;
@@ -1196,7 +1281,10 @@ mod tests {
     #[test]
     fn climbs_wall_crosses_ceiling_and_comes_down() {
         let none: Vec<Vec<Surface>> = vec![vec![]];
-        let world = World { area_dims: &DIMS, surfaces: &none };
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &none,
+        };
         // Seeds durchprobieren, bis eins die ganze Decke schafft (ohne
         // vorher loszulassen) – deterministisch, da fester RNG.
         for seed in 1..200 {
@@ -1234,7 +1322,10 @@ mod tests {
     fn drops_from_ceiling_onto_window() {
         // Fenster unterhalb fast der ganzen Decke: wer loslässt, landet drauf.
         let surfaces = vec![vec![surface(1, 50, 1870, 600)]];
-        let world = World { area_dims: &DIMS, surfaces: &surfaces };
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &surfaces,
+        };
         for seed in 1..200 {
             let mut s = at_left_wall_climbing(seed);
             for _ in 0..(120_000 / 16) {
@@ -1255,7 +1346,10 @@ mod tests {
 
     fn on_floor(seed: u64) -> Sheep {
         let none: Vec<Vec<Surface>> = vec![vec![]];
-        let world = World { area_dims: &DIMS, surfaces: &none };
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &none,
+        };
         let mut s = Sheep::new_at(0, 800.0, seed);
         tick_until_landed(&mut s, &world, 16);
         s
@@ -1264,7 +1358,10 @@ mod tests {
     #[test]
     fn jump_arcs_and_lands_in_sprint() {
         let none: Vec<Vec<Surface>> = vec![vec![]];
-        let world = World { area_dims: &DIMS, surfaces: &none };
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &none,
+        };
         let mut s = on_floor(11);
         s.facing = Facing::Right;
         s.x = 200.0;
@@ -1295,7 +1392,10 @@ mod tests {
     #[test]
     fn meeting_sheep_leap_or_turn() {
         let none: Vec<Vec<Surface>> = vec![vec![]];
-        let world = World { area_dims: &DIMS, surfaces: &none };
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &none,
+        };
         let (mut leaps, mut turns) = (0, 0);
         for seed in 0..40 {
             let mut pair = facing_each_other(seed, AnimId::Run);
@@ -1312,10 +1412,16 @@ mod tests {
                 }
             }
             // Beide reagieren, aber nie springen beide gleichzeitig.
-            assert!(reacted.iter().all(Option::is_some), "seed {seed}: {reacted:?}");
+            assert!(
+                reacted.iter().all(Option::is_some),
+                "seed {seed}: {reacted:?}"
+            );
             assert_ne!(reacted, [Some(AnimId::Jump); 2], "seed {seed}");
             leaps += reacted.iter().filter(|r| **r == Some(AnimId::Jump)).count();
-            turns += reacted.iter().filter(|r| **r == Some(AnimId::Rotate1A)).count();
+            turns += reacted
+                .iter()
+                .filter(|r| **r == Some(AnimId::Rotate1A))
+                .count();
         }
         assert!(leaps > 0 && turns > 0, "Sprünge {leaps}, Umdrehen {turns}");
     }
@@ -1323,7 +1429,10 @@ mod tests {
     #[test]
     fn sheep_never_walk_through_each_other() {
         let none: Vec<Vec<Surface>> = vec![vec![]];
-        let world = World { area_dims: &DIMS, surfaces: &none };
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &none,
+        };
         let floor = 1080.0 - TILE_H as f32;
         // Am Boden laufen und nicht gerade springen/auftreten.
         let grounded = |s: &Sheep| {
@@ -1360,7 +1469,10 @@ mod tests {
     #[test]
     fn no_leap_without_room_to_land() {
         let none: Vec<Vec<Surface>> = vec![vec![]];
-        let world = World { area_dims: &DIMS, surfaces: &none };
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &none,
+        };
         for seed in 0..40 {
             // Kurz vor der rechten Wand: hinter dem anderen Schaf ist kein Platz.
             let mut pair = facing_each_other(seed, AnimId::Run);
@@ -1375,7 +1487,10 @@ mod tests {
     #[test]
     fn bath_meteor_after_walking_off_starts_in_the_air() {
         let none: Vec<Vec<Surface>> = vec![vec![]];
-        let world = World { area_dims: &DIMS, surfaces: &none };
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &none,
+        };
         let floor = 1080.0 - TILE_H as f32;
         let mut meteors = 0;
         for seed in 0..60 {
@@ -1385,7 +1500,11 @@ mod tests {
             s.tick(16, &SEGS, &world);
             if s.anim == AnimId::BathFly {
                 meteors += 1;
-                assert!(s.y < floor - 100.0, "seed {seed}: Meteor startet bei y={}", s.y);
+                assert!(
+                    s.y < floor - 100.0,
+                    "seed {seed}: Meteor startet bei y={}",
+                    s.y
+                );
             }
         }
         assert!(meteors > 0);
@@ -1394,7 +1513,10 @@ mod tests {
     #[test]
     fn sleep3_wakes_on_mouse() {
         let none: Vec<Vec<Surface>> = vec![vec![]];
-        let world = World { area_dims: &DIMS, surfaces: &none };
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &none,
+        };
         let mut s = on_floor(12);
         s.set_anim(AnimId::Sleep3Yawn);
         for _ in 0..200 {
@@ -1408,7 +1530,10 @@ mod tests {
     #[test]
     fn bath_meteor_lands_in_tub_and_tub_disappears() {
         let none: Vec<Vec<Surface>> = vec![vec![]];
-        let world = World { area_dims: &DIMS, surfaces: &none };
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &none,
+        };
         let mut s = Sheep::new_at(0, 800.0, 21);
         s.set_entry(Entry::Bath);
         s.tick(16, &SEGS, &world);
@@ -1434,7 +1559,10 @@ mod tests {
     #[test]
     fn black_sheep_visit_meets_in_the_middle_and_fades() {
         let none: Vec<Vec<Surface>> = vec![vec![]];
-        let world = World { area_dims: &DIMS, surfaces: &none };
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &none,
+        };
         for seed in [31, 32] {
             let mut s = Sheep::new_at(0, 800.0, seed);
             s.set_entry(Entry::Visit);
@@ -1473,7 +1601,10 @@ mod tests {
             win_x: 100,
             win_right: 900,
         }]];
-        let world = World { area_dims: &DIMS, surfaces: &surfaces };
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &surfaces,
+        };
         let mut s = Sheep::new_at(0, 380.0, 5);
         tick_until_landed(&mut s, &world, 16);
         for _ in 0..(300_000 / 16) {
@@ -1491,7 +1622,10 @@ mod tests {
         // Schmale Kante: das Schaf muss früher oder später springen oder
         // abrutschen und unten auf dem Boden ankommen.
         let surfaces = vec![vec![surface(1, 300, 500, 400)]];
-        let world = World { area_dims: &DIMS, surfaces: &surfaces };
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &surfaces,
+        };
         let mut s = Sheep::new_at(0, 380.0, 99);
         tick_until_landed(&mut s, &world, 16);
         assert_eq!(s.support_window(), Some(1));

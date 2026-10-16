@@ -694,7 +694,9 @@ pub const VISIT_WALK: AnimDef = AnimDef {
 
 /// VisitBlush (id=30): anschauen, erröten (127–130), wieder fassen.
 pub const VISIT_BLUSH: AnimDef = AnimDef {
-    frames: &[8, 3, 3, 3, 127, 128, 129, 130, 130, 130, 130, 129, 128, 127, 3, 3, 3],
+    frames: &[
+        8, 3, 3, 3, 127, 128, 129, 130, 130, 130, 130, 129, 128, 127, 3, 3, 3,
+    ],
     interval_ms: 250,
     dx_per_tick: 0,
     repeat: 1,

@@ -15,6 +15,9 @@ impl World<'_> {
     }
 
     pub fn surfaces(&self, monitor_idx: usize) -> &[Surface] {
-        self.surfaces.get(monitor_idx).map(Vec::as_slice).unwrap_or(&[])
+        self.surfaces
+            .get(monitor_idx)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 }

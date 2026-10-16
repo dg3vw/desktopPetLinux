@@ -129,17 +129,37 @@ mod tests {
     use super::*;
 
     fn win(id: WindowId, x: i32, y: i32, w: i32, h: i32) -> WindowRect {
-        WindowRect { id, rect: Rect { x, y, width: w, height: h } }
+        WindowRect {
+            id,
+            rect: Rect {
+                x,
+                y,
+                width: w,
+                height: h,
+            },
+        }
     }
 
-    const MON: Rect = Rect { x: 0, y: 0, width: 1920, height: 1080 };
+    const MON: Rect = Rect {
+        x: 0,
+        y: 0,
+        width: 1920,
+        height: 1080,
+    };
 
     #[test]
     fn single_window_gives_full_edge() {
         let s = walkable_surfaces(&[win(1, 100, 300, 800, 400)], &[MON]);
         assert_eq!(
             s[0],
-            vec![Surface { window: 1, x_start: 100, x_end: 900, y: 300, win_x: 100, win_right: 900 }]
+            vec![Surface {
+                window: 1,
+                x_start: 100,
+                x_end: 900,
+                y: 300,
+                win_x: 100,
+                win_right: 900
+            }]
         );
     }
 
@@ -150,10 +170,16 @@ mod tests {
             &[win(1, 100, 300, 800, 400), win(2, 400, 200, 200, 300)],
             &[MON],
         );
-        let edges1: Vec<_> = s[0].iter().filter(|e| e.window == 1).map(|e| (e.x_start, e.x_end)).collect();
+        let edges1: Vec<_> = s[0]
+            .iter()
+            .filter(|e| e.window == 1)
+            .map(|e| (e.x_start, e.x_end))
+            .collect();
         assert_eq!(edges1, vec![(100, 400), (600, 900)]);
         // Die Kante von Fenster 2 selbst bleibt komplett.
-        assert!(s[0].iter().any(|e| e.window == 2 && e.x_start == 400 && e.x_end == 600));
+        assert!(s[0]
+            .iter()
+            .any(|e| e.window == 2 && e.x_start == 400 && e.x_end == 600));
     }
 
     #[test]
@@ -168,7 +194,9 @@ mod tests {
         assert_eq!((edges1[0].x_start, edges1[0].x_end), (100, 900));
         // 1 liegt zwar darüber, beginnt aber erst bei y=300 – die Kante von 2
         // (y=200) bleibt frei.
-        assert!(s[0].iter().any(|e| e.window == 2 && e.x_start == 400 && e.x_end == 600));
+        assert!(s[0]
+            .iter()
+            .any(|e| e.window == 2 && e.x_start == 400 && e.x_end == 600));
     }
 
     #[test]
@@ -178,7 +206,9 @@ mod tests {
             &[win(1, 100, 300, 800, 400), win(2, 400, 100, 200, 200)],
             &[MON],
         );
-        assert!(s[0].iter().any(|e| e.window == 1 && e.x_start == 100 && e.x_end == 900));
+        assert!(s[0]
+            .iter()
+            .any(|e| e.window == 1 && e.x_start == 100 && e.x_end == 900));
     }
 
     #[test]
@@ -207,26 +237,59 @@ mod tests {
 
     #[test]
     fn edge_spanning_two_monitors_is_split_and_localized() {
-        let right = Rect { x: 1920, y: 0, width: 1280, height: 1024 };
+        let right = Rect {
+            x: 1920,
+            y: 0,
+            width: 1280,
+            height: 1024,
+        };
         let s = walkable_surfaces(&[win(7, 1500, 400, 1000, 300)], &[MON, right]);
         assert_eq!(
             s[0],
-            vec![Surface { window: 7, x_start: 1500, x_end: 1920, y: 400, win_x: 1500, win_right: 2500 }]
+            vec![Surface {
+                window: 7,
+                x_start: 1500,
+                x_end: 1920,
+                y: 400,
+                win_x: 1500,
+                win_right: 2500
+            }]
         );
         assert_eq!(
             s[1],
-            vec![Surface { window: 7, x_start: 0, x_end: 580, y: 400, win_x: -420, win_right: 580 }]
+            vec![Surface {
+                window: 7,
+                x_start: 0,
+                x_end: 580,
+                y: 400,
+                win_x: -420,
+                win_right: 580
+            }]
         );
     }
 
     #[test]
     fn occluded_and_clipped_ends_are_walls() {
-        let right = Rect { x: 1920, y: 0, width: 1280, height: 1024 };
+        let right = Rect {
+            x: 1920,
+            y: 0,
+            width: 1280,
+            height: 1024,
+        };
         let s = walkable_surfaces(
-            &[win(1, 100, 300, 800, 400), win(2, 400, 200, 200, 300), win(3, 1800, 500, 400, 100)],
+            &[
+                win(1, 100, 300, 800, 400),
+                win(2, 400, 200, 200, 300),
+                win(3, 1800, 500, 400, 100),
+            ],
             &[MON, right],
         );
-        let e = |o: usize, w: WindowId, x: i32| *s[o].iter().find(|e| e.window == w && e.x_start == x).unwrap();
+        let e = |o: usize, w: WindowId, x: i32| {
+            *s[o]
+                .iter()
+                .find(|e| e.window == w && e.x_start == x)
+                .unwrap()
+        };
         // Fenster 1, links von Fenster 2: links Abgrund, rechts Wand.
         assert!(e(0, 1, 100).left_is_drop() && !e(0, 1, 100).right_is_drop());
         // Fenster 1, rechts von Fenster 2: links Wand, rechts Abgrund.

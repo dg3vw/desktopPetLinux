@@ -49,7 +49,11 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { n_sheep: 1, color: ColorChoice::Single(SpriteColor::Default), walk_on_windows: true }
+        Self {
+            n_sheep: 1,
+            color: ColorChoice::Single(SpriteColor::Default),
+            walk_on_windows: true,
+        }
     }
 }
 
@@ -88,7 +92,9 @@ impl Settings {
     fn parse(text: &str) -> Self {
         let mut s = Self::default();
         for line in text.lines() {
-            let Some((key, value)) = line.split_once('=') else { continue };
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
             let value = value.trim();
             match key.trim() {
                 "sheep" => {
@@ -134,14 +140,23 @@ mod tests {
             walk_on_windows: false,
         };
         assert_eq!(Settings::parse(&s.format()), s);
-        let r = Settings { color: ColorChoice::Random, ..s };
+        let r = Settings {
+            color: ColorChoice::Random,
+            ..s
+        };
         assert_eq!(Settings::parse(&r.format()), r);
     }
 
     #[test]
     fn invalid_values_fall_back_to_defaults() {
         let s = Settings::parse("sheep=0\ncolor=mauve\nwindows=vielleicht\n# kommentar\n");
-        assert_eq!(s, Settings { n_sheep: 1, ..Settings::default() });
+        assert_eq!(
+            s,
+            Settings {
+                n_sheep: 1,
+                ..Settings::default()
+            }
+        );
     }
 
     #[test]

@@ -11,7 +11,7 @@ use gtk4::prelude::*;
 use gtk4::subclass::prelude::*;
 use gtk4::{Application, ApplicationWindow};
 
-use crate::core::anim::{SpriteColor, TILE_H, TILE_W, frame_to_tile};
+use crate::core::anim::{frame_to_tile, SpriteColor, TILE_H, TILE_W};
 use crate::core::geometry::Rect;
 use crate::core::sheep::{Facing, Sheep};
 use crate::core::surfaces::{walkable_surfaces, Surface};
@@ -76,7 +76,8 @@ impl TileCache {
 
 /// Schneidet eine Kachel aus dem Sprite-Sheet und macht daraus eine Textur.
 fn tile_texture(sheet: &ImageSurface, frame: u32, mirrored: bool) -> Option<gdk4::Texture> {
-    let mut tile = ImageSurface::create(cairo::Format::ARgb32, TILE_W as i32, TILE_H as i32).ok()?;
+    let mut tile =
+        ImageSurface::create(cairo::Format::ARgb32, TILE_W as i32, TILE_H as i32).ok()?;
     {
         let cr = cairo::Context::new(&tile).ok()?;
         draw_tile(&cr, sheet, frame, mirrored);
@@ -132,12 +133,8 @@ mod canvas {
                 &gtk4::graphene::Rect::new(0.0, 0.0, w, h),
             );
             for (p, tex) in self.sprites.borrow().iter() {
-                let bounds = gtk4::graphene::Rect::new(
-                    p.x as f32,
-                    p.y as f32,
-                    TILE_W as f32,
-                    TILE_H as f32,
-                );
+                let bounds =
+                    gtk4::graphene::Rect::new(p.x as f32, p.y as f32, TILE_W as f32, TILE_H as f32);
                 let faded = p.alpha < 1.0;
                 if faded {
                     snapshot.push_opacity(p.alpha as f64);
@@ -164,11 +161,19 @@ impl SpriteCanvas {
     /// sich gegenüber dem letzten Frame etwas geändert hat.
     fn set_sprites(&self, wanted: &[Placed], tiles: &mut TileCache) {
         let imp = self.imp();
-        if imp.sprites.borrow().iter().map(|(p, _)| p).eq(wanted.iter()) {
+        if imp
+            .sprites
+            .borrow()
+            .iter()
+            .map(|(p, _)| p)
+            .eq(wanted.iter())
+        {
             return;
         }
-        *imp.sprites.borrow_mut() =
-            wanted.iter().filter_map(|&p| Some((p, tiles.get(p.key)?))).collect();
+        *imp.sprites.borrow_mut() = wanted
+            .iter()
+            .filter_map(|&p| Some((p, tiles.get(p.key)?)))
+            .collect();
         self.queue_draw();
     }
 }
@@ -427,13 +432,18 @@ fn build_ui<SpawnFn, TickFn>(
                 // Ziel-Monitor: derjenige, der den Sprite-Mittelpunkt enthält.
                 let cx = sprite_root_x + TILE_W as f32 / 2.0;
                 let cy = sprite_root_y + TILE_H as f32 / 2.0;
-                let target = mon_rects_c.iter().enumerate().find(|(_, (mx, my, mw, mh))| {
-                    (cx as i32) >= *mx
-                        && (cx as i32) < *mx + *mw
-                        && (cy as i32) >= *my
-                        && (cy as i32) < *my + *mh
-                });
-                let Some((target_idx, (tmx, tmy, tmw, tmh))) = target else { return };
+                let target = mon_rects_c
+                    .iter()
+                    .enumerate()
+                    .find(|(_, (mx, my, mw, mh))| {
+                        (cx as i32) >= *mx
+                            && (cx as i32) < *mx + *mw
+                            && (cy as i32) >= *my
+                            && (cy as i32) < *my + *mh
+                    });
+                let Some((target_idx, (tmx, tmy, tmw, tmh))) = target else {
+                    return;
+                };
 
                 let max_x = (tmw - TILE_W as i32).max(0) as f32;
                 let max_y = (tmh - TILE_H as i32).max(0) as f32;
@@ -509,68 +519,85 @@ fn build_ui<SpawnFn, TickFn>(
     let last = Rc::new(RefCell::new(Instant::now()));
     // Zuletzt gesetzte Input-Region je Overlay – nur bei Änderung neu setzen.
     let mut last_input: Vec<Option<Vec<InputRect>>> = vec![None; mons.len()];
-    glib::timeout_add_local(std::time::Duration::from_millis(tick_ms as u64), move || {
-        let now = Instant::now();
-        let dt = now.duration_since(*last.borrow()).as_millis() as u32;
-        *last.borrow_mut() = now;
+    glib::timeout_add_local(
+        std::time::Duration::from_millis(tick_ms as u64),
+        move || {
+            let now = Instant::now();
+            let dt = now.duration_since(*last.borrow()).as_millis() as u32;
+            *last.borrow_mut() = now;
 
-        let dims: Vec<(i32, i32)> = overlays_tick
-            .borrow()
-            .iter()
-            .map(|o| o.area.upgrade().map(|a| (a.width(), a.height())).unwrap_or((0, 0)))
-            .collect();
+            let dims: Vec<(i32, i32)> = overlays_tick
+                .borrow()
+                .iter()
+                .map(|o| {
+                    o.area
+                        .upgrade()
+                        .map(|a| (a.width(), a.height()))
+                        .unwrap_or((0, 0))
+                })
+                .collect();
 
-        {
-            let mut s = sheeps_tick.borrow_mut();
-            let surf = surfaces_tick.borrow();
-            let world = World { area_dims: &dims, surfaces: &surf };
-            (tick_cb.borrow_mut())(&mut s, dt.max(1), &world);
-        }
+            {
+                let mut s = sheeps_tick.borrow_mut();
+                let surf = surfaces_tick.borrow();
+                let world = World {
+                    area_dims: &dims,
+                    surfaces: &surf,
+                };
+                (tick_cb.borrow_mut())(&mut s, dt.max(1), &world);
+            }
 
-        // Pro Overlay Sprites und Input-Region aktualisieren – beides nur,
-        // wenn sich etwas geändert hat. Nur der Sprite-Bereich ist klick-/
-        // dragbar, der Rest bleibt durchlässig.
-        {
-            let all = sheeps_tick.borrow();
-            for (idx, oh) in overlays_tick.borrow().iter().enumerate() {
-                let here = || all.iter().filter(|s| s.monitor_idx == idx);
-                if let Some(a) = oh.area.upgrade() {
-                    let mut wanted = Vec::new();
-                    for s in here() {
-                        if let Some(p) = s.prop() {
+            // Pro Overlay Sprites und Input-Region aktualisieren – beides nur,
+            // wenn sich etwas geändert hat. Nur der Sprite-Bereich ist klick-/
+            // dragbar, der Rest bleibt durchlässig.
+            {
+                let all = sheeps_tick.borrow();
+                for (idx, oh) in overlays_tick.borrow().iter().enumerate() {
+                    let here = || all.iter().filter(|s| s.monitor_idx == idx);
+                    if let Some(a) = oh.area.upgrade() {
+                        let mut wanted = Vec::new();
+                        for s in here() {
+                            if let Some(p) = s.prop() {
+                                wanted.push(Placed {
+                                    key: (s.color, p.frame, p.mirrored),
+                                    x: p.x.round() as i32,
+                                    y: p.y.round() as i32,
+                                    alpha: p.alpha,
+                                });
+                            }
                             wanted.push(Placed {
-                                key: (s.color, p.frame, p.mirrored),
-                                x: p.x.round() as i32,
-                                y: p.y.round() as i32,
-                                alpha: p.alpha,
+                                key: (s.color, s.current_frame(), s.facing == Facing::Right),
+                                x: s.x.round() as i32,
+                                y: s.y.round() as i32,
+                                alpha: 1.0,
                             });
                         }
-                        wanted.push(Placed {
-                            key: (s.color, s.current_frame(), s.facing == Facing::Right),
-                            x: s.x.round() as i32,
-                            y: s.y.round() as i32,
-                            alpha: 1.0,
-                        });
+                        a.set_sprites(&wanted, &mut tiles);
                     }
-                    a.set_sprites(&wanted, &mut tiles);
-                }
 
-                let input: Vec<_> = here().map(|s| s.hitbox()).collect();
-                if last_input[idx].as_ref() == Some(&input) {
-                    continue;
+                    let input: Vec<_> = here().map(|s| s.hitbox()).collect();
+                    if last_input[idx].as_ref() == Some(&input) {
+                        continue;
+                    }
+                    let Some(win) = oh.window.upgrade() else {
+                        continue;
+                    };
+                    let Some(surface) = win.native().and_then(|n| n.surface()) else {
+                        continue;
+                    };
+                    let region = cairo::Region::create();
+                    for &(bx, by, bw, bh) in &input {
+                        region
+                            .union_rectangle(&cairo::RectangleInt::new(bx, by, bw, bh))
+                            .ok();
+                    }
+                    surface.set_input_region(&region);
+                    last_input[idx] = Some(input);
                 }
-                let Some(win) = oh.window.upgrade() else { continue };
-                let Some(surface) = win.native().and_then(|n| n.surface()) else { continue };
-                let region = cairo::Region::create();
-                for &(bx, by, bw, bh) in &input {
-                    region.union_rectangle(&cairo::RectangleInt::new(bx, by, bw, bh)).ok();
-                }
-                surface.set_input_region(&region);
-                last_input[idx] = Some(input);
             }
-        }
-        glib::ControlFlow::Continue
-    });
+            glib::ControlFlow::Continue
+        },
+    );
 
     // Fensteroberkanten als Laufflächen; im Tray-Menü abschaltbar.
     let walk_on_windows = Rc::new(Cell::new(settings.walk_on_windows));
@@ -650,7 +677,9 @@ fn start_window_poller(
     enabled: Rc<Cell<bool>>,
 ) {
     use gdk4_x11::prelude::*;
-    let Some(display) = gdk4::Display::default() else { return };
+    let Some(display) = gdk4::Display::default() else {
+        return;
+    };
     let Ok(x11display) = display.downcast::<gdk4_x11::X11Display>() else {
         eprintln!("Kein X11-Display – Fenster-Laufen deaktiviert.");
         return;
@@ -661,75 +690,91 @@ fn start_window_poller(
     let mut ticks: u32 = 0;
     let mut changing = true;
 
-    glib::timeout_add_local(std::time::Duration::from_millis(WINDOW_POLL_MS), move || {
-        ticks = ticks.wrapping_add(1);
-        if !enabled.get() {
-            if surfaces.borrow().iter().any(|l| !l.is_empty()) {
-                surfaces.borrow_mut().iter_mut().for_each(Vec::clear);
+    glib::timeout_add_local(
+        std::time::Duration::from_millis(WINDOW_POLL_MS),
+        move || {
+            ticks = ticks.wrapping_add(1);
+            if !enabled.get() {
+                if surfaces.borrow().iter().any(|l| !l.is_empty()) {
+                    surfaces.borrow_mut().iter_mut().for_each(Vec::clear);
+                }
+                // Nach dem Wiedereinschalten sofort abfragen.
+                changing = true;
+                return glib::ControlFlow::Continue;
             }
-            // Nach dem Wiedereinschalten sofort abfragen.
-            changing = true;
-            return glib::ControlFlow::Continue;
-        }
-        if !changing && ticks % WINDOW_POLL_IDLE_EVERY != 0 {
-            return glib::ControlFlow::Continue;
-        }
-        let xdisp = unsafe { x11display.xdisplay() };
-        x11display.error_trap_push();
-        let windows = unsafe { x11_windows::list_windows(xdisp, &atoms) };
-        // Root-Rechteck jeder Overlay-Zeichenfläche: tatsächliche Fenster-
-        // position (der WM kann verschieben) + Live-Größe der Zeichenfläche.
-        let overlay_rects: Vec<Rect> = overlays
-            .borrow()
-            .iter()
-            .map(|o| {
-                let (Some(win), Some(area)) = (o.window.upgrade(), o.area.upgrade()) else {
-                    return Rect { x: 0, y: 0, width: 0, height: 0 };
-                };
-                let origin = win
-                    .native()
-                    .and_then(|n| n.surface())
-                    .and_then(|s| s.downcast::<gdk4_x11::X11Surface>().ok())
-                    .and_then(|s| unsafe { x11_windows::root_origin(xdisp, s.xid()) })
-                    .unwrap_or((0, 0));
-                Rect { x: origin.0, y: origin.1, width: area.width(), height: area.height() }
-            })
-            .collect();
-        let names: Vec<String> = if debug {
-            windows.iter().map(|w| unsafe { x11_windows::window_name(xdisp, w.id as _) }).collect()
-        } else {
-            Vec::new()
-        };
-        x11display.error_trap_pop_ignored();
+            if !changing && ticks % WINDOW_POLL_IDLE_EVERY != 0 {
+                return glib::ControlFlow::Continue;
+            }
+            let xdisp = unsafe { x11display.xdisplay() };
+            x11display.error_trap_push();
+            let windows = unsafe { x11_windows::list_windows(xdisp, &atoms) };
+            // Root-Rechteck jeder Overlay-Zeichenfläche: tatsächliche Fenster-
+            // position (der WM kann verschieben) + Live-Größe der Zeichenfläche.
+            let overlay_rects: Vec<Rect> = overlays
+                .borrow()
+                .iter()
+                .map(|o| {
+                    let (Some(win), Some(area)) = (o.window.upgrade(), o.area.upgrade()) else {
+                        return Rect {
+                            x: 0,
+                            y: 0,
+                            width: 0,
+                            height: 0,
+                        };
+                    };
+                    let origin = win
+                        .native()
+                        .and_then(|n| n.surface())
+                        .and_then(|s| s.downcast::<gdk4_x11::X11Surface>().ok())
+                        .and_then(|s| unsafe { x11_windows::root_origin(xdisp, s.xid()) })
+                        .unwrap_or((0, 0));
+                    Rect {
+                        x: origin.0,
+                        y: origin.1,
+                        width: area.width(),
+                        height: area.height(),
+                    }
+                })
+                .collect();
+            let names: Vec<String> = if debug {
+                windows
+                    .iter()
+                    .map(|w| unsafe { x11_windows::window_name(xdisp, w.id as _) })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            x11display.error_trap_pop_ignored();
 
-        let new_surfaces = walkable_surfaces(&windows, &overlay_rects);
-        if debug {
-            let mut out = String::new();
-            for (o, r) in overlay_rects.iter().enumerate() {
-                out += &format!("overlay {o}: {r:?}\n");
-            }
-            for (w, name) in windows.iter().zip(&names) {
-                out += &format!("  win 0x{:08x} {:?} {name:?}\n", w.id, w.rect);
-            }
-            for (o, list) in new_surfaces.iter().enumerate() {
-                for e in list {
-                    out += &format!(
-                        "  kante overlay {o}: 0x{:08x} x={}..{} y={}\n",
-                        e.window, e.x_start, e.x_end, e.y
-                    );
+            let new_surfaces = walkable_surfaces(&windows, &overlay_rects);
+            if debug {
+                let mut out = String::new();
+                for (o, r) in overlay_rects.iter().enumerate() {
+                    out += &format!("overlay {o}: {r:?}\n");
+                }
+                for (w, name) in windows.iter().zip(&names) {
+                    out += &format!("  win 0x{:08x} {:?} {name:?}\n", w.id, w.rect);
+                }
+                for (o, list) in new_surfaces.iter().enumerate() {
+                    for e in list {
+                        out += &format!(
+                            "  kante overlay {o}: 0x{:08x} x={}..{} y={}\n",
+                            e.window, e.x_start, e.x_end, e.y
+                        );
+                    }
+                }
+                if out != last_debug {
+                    eprint!("--- Fenster/Kanten ---\n{out}");
+                    last_debug = out;
                 }
             }
-            if out != last_debug {
-                eprint!("--- Fenster/Kanten ---\n{out}");
-                last_debug = out;
+            changing = *surfaces.borrow() != new_surfaces;
+            if changing {
+                *surfaces.borrow_mut() = new_surfaces;
             }
-        }
-        changing = *surfaces.borrow() != new_surfaces;
-        if changing {
-            *surfaces.borrow_mut() = new_surfaces;
-        }
-        glib::ControlFlow::Continue
-    });
+            glib::ControlFlow::Continue
+        },
+    );
 }
 
 /// Zeichnet eine Kachel des Sprite-Sheets an (0, 0). Die Kacheln schauen
@@ -762,7 +807,11 @@ impl PointerPoller {
                 return None;
             }
             let root = x11::xlib::XDefaultRootWindow(d);
-            Some(Self { display: d, root, last: None })
+            Some(Self {
+                display: d,
+                root,
+                last: None,
+            })
         }
     }
 
@@ -786,7 +835,11 @@ impl PointerPoller {
                 &mut wy,
                 &mut mask,
             );
-            if ok == 0 { None } else { Some((rx, ry)) }
+            if ok == 0 {
+                None
+            } else {
+                Some((rx, ry))
+            }
         }
     }
 
@@ -794,7 +847,9 @@ impl PointerPoller {
     /// hat. Beim allerersten Aufruf wird nur der Referenzwert gesetzt und
     /// false zurückgegeben (sonst würde jedes Sheep beim Start sofort wach).
     fn moved_since_last(&mut self) -> bool {
-        let Some(pos) = self.query() else { return false };
+        let Some(pos) = self.query() else {
+            return false;
+        };
         let moved = match self.last {
             Some(prev) => prev != pos,
             None => false,
@@ -819,11 +874,19 @@ impl Drop for PointerPoller {
 /// bevor Cinnamon Task-/Pager-Einträge anlegt.
 fn apply_overlay_wm_state(window: &ApplicationWindow) {
     use gdk4_x11::prelude::*;
-    let Some(surface) = window.native().and_then(|n| n.surface()) else { return };
-    let Ok(x11surf) = surface.downcast::<gdk4_x11::X11Surface>() else { return };
+    let Some(surface) = window.native().and_then(|n| n.surface()) else {
+        return;
+    };
+    let Ok(x11surf) = surface.downcast::<gdk4_x11::X11Surface>() else {
+        return;
+    };
     let xid = x11surf.xid();
-    let Some(display) = gdk4::Display::default() else { return };
-    let Ok(x11display) = display.downcast::<gdk4_x11::X11Display>() else { return };
+    let Some(display) = gdk4::Display::default() else {
+        return;
+    };
+    let Ok(x11display) = display.downcast::<gdk4_x11::X11Display>() else {
+        return;
+    };
     unsafe {
         let xdisp = x11display.xdisplay();
         for state in [
@@ -881,11 +944,19 @@ unsafe fn send_wm_state(
 /// dadurch komplett verrutschen.
 fn place_overlay_via_x11(window: &ApplicationWindow, x: i32, y: i32, w: i32, h: i32) {
     use gdk4_x11::prelude::*;
-    let Some(surface) = window.native().and_then(|n| n.surface()) else { return };
-    let Ok(x11surf) = surface.downcast::<gdk4_x11::X11Surface>() else { return };
+    let Some(surface) = window.native().and_then(|n| n.surface()) else {
+        return;
+    };
+    let Ok(x11surf) = surface.downcast::<gdk4_x11::X11Surface>() else {
+        return;
+    };
     let xid = x11surf.xid();
-    let Some(display) = gdk4::Display::default() else { return };
-    let Ok(x11display) = display.downcast::<gdk4_x11::X11Display>() else { return };
+    let Some(display) = gdk4::Display::default() else {
+        return;
+    };
+    let Ok(x11display) = display.downcast::<gdk4_x11::X11Display>() else {
+        return;
+    };
     unsafe {
         let xdisp = x11display.xdisplay();
         x11::xlib::XMoveResizeWindow(xdisp, xid, x, y, w as u32, h as u32);
@@ -966,7 +1037,10 @@ impl ksni::Tray for DesktopSheepTray {
         }
         let count_options = counts
             .iter()
-            .map(|c| RadioItem { label: c.to_string(), ..Default::default() })
+            .map(|c| RadioItem {
+                label: c.to_string(),
+                ..Default::default()
+            })
             .collect();
         // Alle Einzelfarben, dann „Zufällig“.
         let choices: Vec<ColorChoice> = SpriteColor::ALL
@@ -976,7 +1050,10 @@ impl ksni::Tray for DesktopSheepTray {
             .collect();
         let color_options = choices
             .iter()
-            .map(|&c| RadioItem { label: color_label(c).into(), ..Default::default() })
+            .map(|&c| RadioItem {
+                label: color_label(c).into(),
+                ..Default::default()
+            })
             .collect();
 
         vec![
@@ -996,7 +1073,10 @@ impl ksni::Tray for DesktopSheepTray {
             SubMenu {
                 label: "Farbe".into(),
                 submenu: vec![RadioGroup {
-                    selected: choices.iter().position(|&c| c == self.settings.color).unwrap_or(0),
+                    selected: choices
+                        .iter()
+                        .position(|&c| c == self.settings.color)
+                        .unwrap_or(0),
                     select: Box::new(move |tray: &mut Self, i| {
                         tray.apply(TrayCmd::Color(choices[i]));
                     }),
@@ -1050,7 +1130,11 @@ fn desktop_file_item(label: &str, file: DesktopFile) -> ksni::MenuItem<DesktopSh
 /// kommen über den zurückgegebenen Kanal beim GTK-Loop an.
 fn start_tray_service(settings: Settings) -> mpsc::Receiver<TrayCmd> {
     let (tx, rx) = mpsc::channel();
-    let tray = DesktopSheepTray { settings, tx, icons: tray_icons() };
+    let tray = DesktopSheepTray {
+        settings,
+        tx,
+        icons: tray_icons(),
+    };
     let service = ksni::TrayService::new(tray);
     service.spawn();
     rx
@@ -1085,12 +1169,23 @@ fn tray_icons() -> Vec<ksni::Icon> {
             for row in data.chunks(stride).take(size as usize) {
                 for px in row[..size as usize * 4].chunks_exact(4) {
                     // Cairo: u32 in nativer Byte-Reihenfolge, vormultipliziert.
-                    let [b, g, r, a] = u32::from_ne_bytes([px[0], px[1], px[2], px[3]]).to_le_bytes();
-                    let unmul = |c: u8| if a == 0 { 0 } else { (c as u32 * 255 / a as u32) as u8 };
+                    let [b, g, r, a] =
+                        u32::from_ne_bytes([px[0], px[1], px[2], px[3]]).to_le_bytes();
+                    let unmul = |c: u8| {
+                        if a == 0 {
+                            0
+                        } else {
+                            (c as u32 * 255 / a as u32) as u8
+                        }
+                    };
                     argb.extend_from_slice(&[a, unmul(r), unmul(g), unmul(b)]);
                 }
             }
-            Some(ksni::Icon { width: size, height: size, data: argb })
+            Some(ksni::Icon {
+                width: size,
+                height: size,
+                data: argb,
+            })
         })
         .collect()
 }

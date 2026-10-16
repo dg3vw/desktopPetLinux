@@ -20,7 +20,9 @@ enum Command {
 }
 
 fn print_help() {
-    let bin = std::env::args().next().unwrap_or_else(|| "desktop_sheep".into());
+    let bin = std::env::args()
+        .next()
+        .unwrap_or_else(|| "desktop_sheep".into());
     println!(
         "desktop_sheep – Overlay-Schafe an der Bildschirmunterkante.\n\
          \n\
