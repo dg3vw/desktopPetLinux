@@ -175,6 +175,9 @@ pub enum AnimId {
     VisitWalk,
     /// blacksheepc (id=30): vor dem schwarzen Schaf erröten.
     VisitBlush,
+    /// Frei komponiert: Timer abgelaufen – auf der Stelle hüpfen und sich
+    /// bei jedem Hüpfer umdrehen, bis der Alarm quittiert wird.
+    Alarm,
 }
 
 pub struct AnimDef {
@@ -704,6 +707,17 @@ pub const VISIT_BLUSH: AnimDef = AnimDef {
     flip_on_end: false,
 };
 
+/// Alarm (frei komponiert): die Bocksprung-Frames ohne Vorwärtsbewegung,
+/// Sprungbogen über `Sheep::lift`. Wiederholt sich, bis der Alarm endet.
+pub const ALARM: AnimDef = AnimDef {
+    frames: &[76, 30, 30, 23, 23, 23, 24, 24, 77],
+    interval_ms: 70,
+    dx_per_tick: 0,
+    repeat: 1,
+    next: &[(100, AnimId::Alarm)],
+    flip_on_end: true,
+};
+
 pub fn def(id: AnimId) -> &'static AnimDef {
     match id {
         AnimId::Walk => &WALK,
@@ -753,6 +767,7 @@ pub fn def(id: AnimId) -> &'static AnimDef {
         AnimId::VisitRun => &VISIT_RUN,
         AnimId::VisitWalk => &VISIT_WALK,
         AnimId::VisitBlush => &VISIT_BLUSH,
+        AnimId::Alarm => &ALARM,
     }
 }
 

@@ -32,6 +32,8 @@ const JUMP_VY: f32 = 300.0;
 const DETACH_PX: f32 = 3.0;
 /// Scheitelhöhe des Bocksprungs (Pixel).
 const JUMP_HEIGHT: f32 = 45.0;
+/// Scheitelhöhe der Alarm-Hüpfer (Pixel).
+const ALARM_HOP_HEIGHT: f32 = 20.0;
 /// Wie hoch das Schaf beim Aussteigen in der Wanne steht (Original offsety).
 const BATH_STAND_PX: f32 = 20.0;
 /// Fluggeschwindigkeit des Bade-Meteors je Achse (Pixel pro Sekunde).
@@ -134,6 +136,8 @@ pub struct Sheep {
     prop_ttl_ms: Option<u32>,
     /// Treffpunkt beim Besuch des schwarzen Schafs (x, Overlay-lokal).
     meet_x: f32,
+    /// Timer abgelaufen: hüpft auf der Stelle, sobald es irgendwo steht.
+    alarm: bool,
     anim: AnimId,
     frame_idx: usize,
     frame_elapsed_ms: u32,
@@ -164,6 +168,7 @@ impl Sheep {
             prop: None,
             prop_ttl_ms: None,
             meet_x: 0.0,
+            alarm: false,
             anim: AnimId::Walk,
             frame_idx: 0,
             frame_elapsed_ms: 0,
@@ -210,6 +215,18 @@ impl Sheep {
         self.support
     }
 
+    /// Oberkante des Sprites am höchsten Punkt eines laufenden Sprungs –
+    /// Anker für die Sprechblase, damit sie beim Hüpfen ruhig stehen bleibt
+    /// und das Schaf nicht hineinspringt.
+    pub fn bubble_anchor_y(&self) -> f32 {
+        let peak = match self.anim {
+            AnimId::Jump => JUMP_HEIGHT,
+            AnimId::Alarm => ALARM_HOP_HEIGHT,
+            _ => 0.0,
+        };
+        self.y + self.lift() - peak
+    }
+
     /// Aktuelle Sprite-Bounding-Box in Overlay-lokalen Koordinaten.
     pub fn hitbox(&self) -> (i32, i32, i32, i32) {
         (self.x as i32, self.y as i32, TILE_W as i32, TILE_H as i32)
@@ -232,6 +249,51 @@ impl Sheep {
         if let Some(next) = wake {
             self.set_anim(next);
         }
+    }
+
+    /// Alarm an/aus. Eingeschaltet wechselt das Schaf in `Alarm`, sobald es
+    /// auf Boden oder Fenster steht; ausgeschaltet läuft es normal weiter.
+    pub fn set_alarm(&mut self, on: bool) {
+        self.alarm = on;
+        if !on && self.anim == AnimId::Alarm {
+            self.set_anim(AnimId::Walk);
+        }
+    }
+
+    /// Kann jetzt in die Alarm-Hüpfer wechseln: steht oder läuft auf einer
+    /// Fläche, statt zu fallen, zu klettern oder einen Auftritt zu spielen.
+    fn can_start_alarm(&self) -> bool {
+        !self.falling
+            && !self.dragged
+            && !self.leaving
+            && self.pending_entry.is_none()
+            && self.hang_offset == 0.0
+            && matches!(
+                self.anim,
+                AnimId::Walk
+                    | AnimId::Rotate1A
+                    | AnimId::Rotate1B
+                    | AnimId::YawnSleep
+                    | AnimId::Sleep
+                    | AnimId::WakeUp
+                    | AnimId::Sleep2Yawn
+                    | AnimId::Sleep2
+                    | AnimId::Sleep2Wake
+                    | AnimId::Sleep3Yawn
+                    | AnimId::Sleep3
+                    | AnimId::Sleep3Wake
+                    | AnimId::Eat
+                    | AnimId::RunBegin
+                    | AnimId::Run
+                    | AnimId::RunEnd
+                    | AnimId::FallHard
+                    | AnimId::FallSoft
+                    | AnimId::Boing
+                    | AnimId::WallRam
+                    | AnimId::LookDown
+                    | AnimId::JumpDownLand
+                    | AnimId::FallWinD
+            )
     }
 
     /// User hat das Sheep gepackt: Zappel-Animation starten, Bewegung
@@ -317,6 +379,9 @@ impl Sheep {
             // Eintritt in eine Fall-Animation (Sprung/Abrutschen).
             return;
         }
+        if self.alarm && self.can_start_alarm() {
+            self.set_anim(AnimId::Alarm);
+        }
         match self.anim {
             AnimId::Surprised => {
                 // Hängt verdutzt in der Luft – weder Bewegung noch Boden-Snap.
@@ -395,16 +460,20 @@ impl Sheep {
     /// Aufstehen in der Wanne.
     fn lift(&self) -> f32 {
         match self.anim {
-            AnimId::Jump => {
-                let cur = def(self.anim);
-                let total = (cur.frames.len() as u32 * cur.interval_ms) as f32;
-                let t = self.frame_idx as u32 * cur.interval_ms + self.frame_elapsed_ms;
-                let p = (t as f32 / total).clamp(0.0, 1.0);
-                4.0 * JUMP_HEIGHT * p * (1.0 - p)
-            }
+            AnimId::Jump => self.hop_arc(JUMP_HEIGHT),
+            AnimId::Alarm => self.hop_arc(ALARM_HOP_HEIGHT),
             AnimId::BathOut => BATH_STAND_PX,
             _ => 0.0,
         }
+    }
+
+    /// Parabelbogen über die Dauer der aktuellen Animation mit Scheitel `height`.
+    fn hop_arc(&self, height: f32) -> f32 {
+        let cur = def(self.anim);
+        let total = (cur.frames.len() as u32 * cur.interval_ms) as f32;
+        let t = self.frame_idx as u32 * cur.interval_ms + self.frame_elapsed_ms;
+        let p = (t as f32 / total).clamp(0.0, 1.0);
+        4.0 * height * p * (1.0 - p)
     }
 
     /// Startet einen Auftritt auf einem zufälligen Monitor. Bad und Besuch
@@ -844,7 +913,10 @@ impl Sheep {
     /// Bade-Meteor oder mit Besuch vom schwarzen Schaf.
     fn respawn(&mut self, world: &World) {
         let r = self.rng.range(100);
-        let entry = if r < ENTRY_BATH_PERCENT {
+        // Beim Alarm ohne Umweg zurück ins Bild.
+        let entry = if self.alarm {
+            Entry::Sky
+        } else if r < ENTRY_BATH_PERCENT {
             Entry::Bath
         } else if r < ENTRY_BATH_PERCENT + ENTRY_VISIT_PERCENT {
             Entry::Visit
@@ -1638,5 +1710,105 @@ mod tests {
             }
         }
         assert!(reached_floor);
+    }
+
+    #[test]
+    fn alarm_hops_in_place_on_the_floor() {
+        let surfaces: Vec<Vec<Surface>> = vec![Vec::new()];
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &surfaces,
+        };
+        let mut s = Sheep::new_at(0, 400.0, 11);
+        tick_until_landed(&mut s, &world, 16);
+        s.set_anim(AnimId::Walk);
+        s.set_alarm(true);
+        s.tick(16, &SEGS, &world);
+        assert_eq!(s.anim, AnimId::Alarm);
+        let x0 = s.x;
+        let mut max_lift: f32 = 0.0;
+        for _ in 0..300 {
+            s.tick(16, &SEGS, &world);
+            assert_eq!(s.anim, AnimId::Alarm);
+            assert_eq!(s.x, x0);
+            max_lift = max_lift.max(1080.0 - TILE_H as f32 - s.y);
+        }
+        assert!(max_lift > 10.0, "hüpft nicht: {max_lift}");
+    }
+
+    #[test]
+    fn alarm_waits_until_landed() {
+        let surfaces: Vec<Vec<Surface>> = vec![Vec::new()];
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &surfaces,
+        };
+        let mut s = Sheep::new_at(0, 400.0, 12);
+        s.set_alarm(true);
+        s.tick(16, &SEGS, &world);
+        assert!(s.falling);
+        assert_ne!(s.anim, AnimId::Alarm);
+        for _ in 0..1000 {
+            s.tick(16, &SEGS, &world);
+            if s.anim == AnimId::Alarm {
+                assert!(!s.falling);
+                return;
+            }
+        }
+        panic!("Alarm nach der Landung nicht gestartet");
+    }
+
+    #[test]
+    fn alarm_wakes_sleeping_sheep() {
+        let surfaces: Vec<Vec<Surface>> = vec![Vec::new()];
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &surfaces,
+        };
+        let mut s = Sheep::new_at(0, 400.0, 13);
+        tick_until_landed(&mut s, &world, 16);
+        s.set_anim(AnimId::Sleep);
+        s.set_alarm(true);
+        s.tick(16, &SEGS, &world);
+        assert_eq!(s.anim, AnimId::Alarm);
+    }
+
+    #[test]
+    fn alarm_on_window_keeps_support() {
+        let mut s = landed_on_window();
+        let surfaces = vec![vec![surface(1, 100, 900, 300)]];
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &surfaces,
+        };
+        s.set_alarm(true);
+        for _ in 0..300 {
+            s.tick(16, &SEGS, &world);
+        }
+        assert_eq!(s.anim, AnimId::Alarm);
+        assert_eq!(s.support_window(), Some(1));
+        assert!(s.y + TILE_H as f32 <= 300.0);
+    }
+
+    #[test]
+    fn alarm_off_returns_to_walking() {
+        let surfaces: Vec<Vec<Surface>> = vec![Vec::new()];
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &surfaces,
+        };
+        let mut s = Sheep::new_at(0, 400.0, 14);
+        tick_until_landed(&mut s, &world, 16);
+        s.set_alarm(true);
+        for _ in 0..50 {
+            s.tick(16, &SEGS, &world);
+        }
+        assert_eq!(s.anim, AnimId::Alarm);
+        s.set_alarm(false);
+        assert_eq!(s.anim, AnimId::Walk);
+        for _ in 0..50 {
+            s.tick(16, &SEGS, &world);
+            assert_ne!(s.anim, AnimId::Alarm);
+        }
     }
 }

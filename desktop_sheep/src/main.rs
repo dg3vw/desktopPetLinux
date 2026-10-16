@@ -2,6 +2,7 @@ mod core;
 mod desktop_files;
 mod platform;
 mod settings;
+mod timer;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

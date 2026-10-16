@@ -31,9 +31,16 @@ unterstützt.
 - Mehrere Schafe gleichzeitig (`--sheep N`); sie laufen nicht durcheinander
   hindurch, sondern springen übereinander hinweg oder drehen um
 - Farbvarianten (`--color`), auch zufällig je Schaf (`--color random`)
-- Tray-Menü: Anzahl Schafe, Farbe, „Auf Fenstern laufen“, „Beim
+- Eieruhr im Tray-Menü (1 bis 60 Minuten): Die Schafe laufen normal weiter;
+  zeigt die Maus auf ein Schaf, nennt es in einer Sprechblase die Restzeit.
+  Ist die Zeit um, hüpfen alle Schafe auf der Stelle, eines zeigt
+  „Zeit ist um!“, und einmal erklingt der Systemklang
+  `alarm-clock-elapsed` (über `paplay`, `pw-play` oder
+  `canberra-gtk-play`, falls vorhanden). Ein Klick auf ein Schaf oder die
+  Blase – oder „Alarm beenden“ im Tray – beendet den Alarm
+- Tray-Menü: Timer, Anzahl Schafe, Farbe, „Auf Fenstern laufen“, „Beim
   Anmelden starten“ und „Im Startmenü anzeigen“ – wirkt sofort und wird
-  gespeichert; dazu „Beenden“
+  gespeichert (außer dem Timer); dazu „Beenden“
 - Autostart- und Startmenü-Eintrag per Tray-Menü oder Kommandozeile
 - Läuft nur einmal: ein weiterer Start (z. B. aus dem Startmenü) beendet
   sich sofort, wenn schon Schafe unterwegs sind
@@ -85,6 +92,7 @@ erkannten Fenster und begehbaren Kanten auf stderr aus.
 Die seltenen Auftritte lassen sich direkt beim Start erzwingen:
 `DESKTOP_SHEEP_ENTRY=bath` (Meteor in die Badewanne) bzw.
 `DESKTOP_SHEEP_ENTRY=visit` (schwarzes Schaf).
+`DESKTOP_SHEEP_TIMER=<sekunden>` startet gleich beim Start einen Timer.
 
 ## Tests
 
@@ -112,17 +120,20 @@ alter oder neuerer glibc als der Build-Rechner.
 src/
   main.rs            CLI, Schafe erzeugen, Tick-Callback
   settings.rs        gespeicherte Einstellungen (settings.conf)
+  timer.rs           Eieruhr: Countdown-Zustand, Zeitformate
   desktop_files.rs   .desktop-Einträge für Autostart und Startmenü
   core/              plattformunabhängig (kein GTK/X11)
     geometry.rs      Monitor-Rechtecke → Boden-Segmente
     surfaces.rs      Fensterrechtecke → begehbare, unverdeckte Oberkanten
     world.rs         Tick-Kontext (Overlay-Maße + Kanten)
     anim.rs          Animations-Tabelle (aus animations.xml abgeleitet), RNG
+    bubble.rs        Lage einer Sprechblase über/unter dem Sprite
     sheep.rs         Zustandsmaschine, Bewegung, Fall-Physik, Fenster-Halt
   platform/
     mod.rs           Platform-Trait
     linux.rs         GTK4/X11-Backend: ein Overlay pro Monitor, Input-Region,
-                     Drag, WM-Hints, Tray-Menü (ksni), Fenster-Poller
+                     Drag, WM-Hints, Tray-Menü (ksni), Fenster-Poller,
+                     Sprechblasen, Timer-Alarm samt Ton
     x11_windows.rs   Fensterliste per EWMH (_NET_CLIENT_LIST_STACKING,
                      Frame-/CSD-Extents, Filter für Desktop/Dock/minimiert)
 assets/              Sprite-Sheets (40×40-Kacheln, 16 Spalten)

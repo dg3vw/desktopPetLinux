@@ -2,7 +2,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::mpsc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use cairo::ImageSurface;
 use gdk4::prelude::*;
@@ -12,6 +12,7 @@ use gtk4::subclass::prelude::*;
 use gtk4::{Application, ApplicationWindow};
 
 use crate::core::anim::{frame_to_tile, SpriteColor, TILE_H, TILE_W};
+use crate::core::bubble::{self, BubblePlacement};
 use crate::core::geometry::Rect;
 use crate::core::sheep::{Facing, Sheep};
 use crate::core::surfaces::{walkable_surfaces, Surface};
@@ -20,6 +21,7 @@ use crate::desktop_files::{DesktopFile, ICON_PNG};
 use crate::platform::x11_windows;
 use crate::platform::Platform;
 use crate::settings::{ColorChoice, Settings};
+use crate::timer::{self, Timer};
 
 /// Takt des Fenster-Pollers. Abgefragt wird nur jeden
 /// `WINDOW_POLL_IDLE_EVERY`-ten Takt (pro Abfrage ein paar X11-Roundtrips je
@@ -27,6 +29,11 @@ use crate::settings::{ColorChoice, Settings};
 /// sofort wieder, damit ein Schaf einem gezogenen Fenster flüssig folgt.
 const WINDOW_POLL_MS: u64 = 50;
 const WINDOW_POLL_IDLE_EVERY: u32 = 5;
+
+/// Dauern, die das Tray-Menü für die Eieruhr anbietet (Minuten).
+const TIMER_MINUTES: [u64; 10] = [1, 3, 5, 10, 15, 20, 25, 30, 45, 60];
+/// Wie oft die Restzeit im Tray-Menü/-Tooltip nachgeführt wird.
+const TRAY_TIMER_REFRESH: Duration = Duration::from_secs(10);
 
 struct OverlayHandle {
     area: gtk4::glib::WeakRef<SpriteCanvas>,
@@ -108,6 +115,7 @@ mod canvas {
     #[derive(Default)]
     pub struct SpriteCanvas {
         pub(super) sprites: RefCell<Vec<(Placed, gdk4::Texture)>>,
+        pub(super) bubbles: RefCell<Vec<PlacedBubble>>,
     }
 
     #[glib::object_subclass]
@@ -144,6 +152,9 @@ mod canvas {
                     snapshot.pop();
                 }
             }
+            for b in self.bubbles.borrow().iter() {
+                draw_bubble(&self.obj(), snapshot, b);
+            }
         }
     }
 }
@@ -157,25 +168,117 @@ impl SpriteCanvas {
         glib::Object::new()
     }
 
-    /// Übernimmt die Sprites dieses Overlays; neu gezeichnet wird nur, wenn
-    /// sich gegenüber dem letzten Frame etwas geändert hat.
-    fn set_sprites(&self, wanted: &[Placed], tiles: &mut TileCache) {
+    /// Übernimmt Sprites und Sprechblasen dieses Overlays; neu gezeichnet
+    /// wird nur, wenn sich gegenüber dem letzten Frame etwas geändert hat.
+    fn set_scene(&self, wanted: &[Placed], bubbles: Vec<PlacedBubble>, tiles: &mut TileCache) {
         let imp = self.imp();
-        if imp
+        let same_sprites = imp
             .sprites
             .borrow()
             .iter()
             .map(|(p, _)| p)
-            .eq(wanted.iter())
-        {
+            .eq(wanted.iter());
+        if same_sprites && *imp.bubbles.borrow() == bubbles {
             return;
         }
-        *imp.sprites.borrow_mut() = wanted
-            .iter()
-            .filter_map(|&p| Some((p, tiles.get(p.key)?)))
-            .collect();
+        if !same_sprites {
+            *imp.sprites.borrow_mut() = wanted
+                .iter()
+                .filter_map(|&p| Some((p, tiles.get(p.key)?)))
+                .collect();
+        }
+        *imp.bubbles.borrow_mut() = bubbles;
         self.queue_draw();
     }
+
+    /// Größe des Blasenkörpers für `text` (Text plus Innenabstand).
+    fn bubble_size(&self, text: &str) -> (i32, i32) {
+        let (w, h) = bubble_layout(self, text).pixel_size();
+        (w + 2 * BUBBLE_PAD_X, h + 2 * BUBBLE_PAD_Y)
+    }
+}
+
+/// Innenabstand zwischen Blasenrand und Text (Pixel).
+const BUBBLE_PAD_X: i32 = 10;
+const BUBBLE_PAD_Y: i32 = 6;
+
+/// Eine Sprechblase samt Lage auf dem Overlay.
+#[derive(Debug, Clone, PartialEq)]
+struct PlacedBubble {
+    text: String,
+    at: BubblePlacement,
+}
+
+fn bubble_layout(widget: &impl IsA<gtk4::Widget>, text: &str) -> gtk4::pango::Layout {
+    let layout = widget.create_pango_layout(Some(text));
+    layout.set_alignment(gtk4::pango::Alignment::Center);
+    layout
+}
+
+/// Zeichnet eine Sprechblase: heller Körper mit Rahmen, Spitze zum Schaf
+/// hin, zentrierter Text.
+fn draw_bubble(widget: &SpriteCanvas, snapshot: &gtk4::Snapshot, b: &PlacedBubble) {
+    use gtk4::{graphene, gsk};
+    const FILL: gdk4::RGBA = gdk4::RGBA::new(1.0, 0.99, 0.93, 0.97);
+    const LINE: gdk4::RGBA = gdk4::RGBA::new(0.25, 0.25, 0.25, 1.0);
+    const TEXT: gdk4::RGBA = gdk4::RGBA::new(0.1, 0.1, 0.1, 1.0);
+    let a = &b.at;
+
+    let body = gsk::RoundedRect::from_rect(
+        graphene::Rect::new(a.x as f32, a.y as f32, a.width as f32, a.height as f32),
+        bubble::RADIUS as f32,
+    );
+    snapshot.push_rounded_clip(&body);
+    snapshot.append_color(&FILL, body.bounds());
+    snapshot.pop();
+    snapshot.append_border(&body, &[1.5; 4], &[LINE; 4]);
+
+    // Spitze: Grundlinie überdeckt den Rahmen, die beiden Schrägen
+    // schließen an ihn an.
+    let tail = bubble::TAIL as f64;
+    let tx = a.tail_x as f64;
+    let (base, tip) = if a.below {
+        (a.y as f64 + 1.0, (a.y - bubble::TAIL) as f64)
+    } else {
+        (
+            (a.y + a.height) as f64 - 1.0,
+            (a.y + a.height + bubble::TAIL) as f64,
+        )
+    };
+    let cr = snapshot.append_cairo(&graphene::Rect::new(
+        (tx - tail - 2.0) as f32,
+        base.min(tip) as f32 - 2.0,
+        (2.0 * tail + 4.0) as f32,
+        (tail + 4.0) as f32,
+    ));
+    cr.move_to(tx - 0.8 * tail, base);
+    cr.line_to(tx, tip);
+    cr.line_to(tx + 0.8 * tail, base);
+    cr.set_source_rgba(
+        FILL.red() as f64,
+        FILL.green() as f64,
+        FILL.blue() as f64,
+        1.0,
+    );
+    cr.fill_preserve().ok();
+    cr.set_source_rgba(
+        LINE.red() as f64,
+        LINE.green() as f64,
+        LINE.blue() as f64,
+        1.0,
+    );
+    cr.set_line_width(1.5);
+    cr.stroke().ok();
+
+    snapshot.save();
+    snapshot.translate(&graphene::Point::new(
+        (a.x + BUBBLE_PAD_X) as f32,
+        (a.y + BUBBLE_PAD_Y) as f32,
+    ));
+    let layout = bubble_layout(widget, &b.text);
+    layout.set_width((a.width - 2 * BUBBLE_PAD_X) * gtk4::pango::SCALE);
+    snapshot.append_layout(&layout, &TEXT);
+    snapshot.restore();
 }
 
 /// Zustand einer laufenden Drag-Geste.
@@ -195,7 +298,112 @@ enum TrayCmd {
     SheepCount(usize),
     Color(ColorChoice),
     WalkOnWindows(bool),
+    StartTimer(Duration),
+    CancelTimer,
+    StopAlarm,
     Quit,
+}
+
+/// Verbindung zum Tray-Thread: Menü-Aktionen kommen über `rx`, Anzeige-
+/// Änderungen (Timer, Alarm) gehen über `handle` zurück.
+struct TrayLink {
+    rx: mpsc::Receiver<TrayCmd>,
+    handle: ksni::Handle<DesktopSheepTray>,
+}
+
+/// Eieruhr samt Alarm und Schaf unter dem Mauszeiger – geteilt zwischen
+/// Tick-Loop, Drag-Geste und Tray-Kommandos.
+#[derive(Default)]
+struct TimerUi {
+    timer: Timer,
+    /// Dauer des abgelaufenen Timers, solange der Alarm läuft.
+    alarm: Option<Duration>,
+    /// Schaf unter dem Mauszeiger (nur bei laufendem Timer ermittelt).
+    hovered: Option<usize>,
+}
+
+impl TimerUi {
+    /// Timer abgelaufen: alle Schafe hüpfen, einmal klingeln.
+    fn fire(&mut self, total: Duration, sheeps: &mut [Sheep]) {
+        self.alarm = Some(total);
+        for s in sheeps {
+            s.set_alarm(true);
+        }
+        play_alarm_sound();
+    }
+
+    fn stop_alarm(&mut self, sheeps: &mut [Sheep]) {
+        self.alarm = None;
+        for s in sheeps {
+            s.set_alarm(false);
+        }
+    }
+
+    /// Text der Sprechblase über Schaf `i`: beim Alarm über dem ersten
+    /// Schaf, sonst die Restzeit über dem Schaf unter dem Mauszeiger.
+    fn bubble_text(&self, i: usize, now: Instant) -> Option<String> {
+        if let Some(total) = self.alarm {
+            return (i == 0).then(|| format!("Zeit ist um!\n({})", timer::fmt_duration(total)));
+        }
+        if self.hovered != Some(i) {
+            return None;
+        }
+        let left = self.timer.remaining(now)?;
+        Some(format!("Timer: noch {}", timer::fmt_remaining(left)))
+    }
+
+    /// Timer- und Alarmzustand ins Tray-Menü übernehmen.
+    fn sync_tray(&self, tray: &ksni::Handle<DesktopSheepTray>) {
+        let deadline = self.timer.deadline();
+        let alarm = self.alarm.is_some();
+        tray.update(|t| {
+            t.timer_deadline = deadline;
+            t.alarm = alarm;
+        });
+    }
+}
+
+/// Index des Schafs unter dem Punkt `p` (Root-Koordinaten).
+fn sheep_at(sheeps: &[Sheep], mon_rects: &[(i32, i32, i32, i32)], p: (i32, i32)) -> Option<usize> {
+    sheeps.iter().position(|s| {
+        mon_rects
+            .get(s.monitor_idx)
+            .is_some_and(|&(mx, my, _, _)| s.contains((p.0 - mx) as f32, (p.1 - my) as f32))
+    })
+}
+
+/// Spielt einmal den freedesktop-Klang „alarm-clock-elapsed“ ab, mit dem
+/// ersten Player, der funktioniert. Fehlt alles, bleibt es still.
+fn play_alarm_sound() {
+    const SOUND: &str = "/usr/share/sounds/freedesktop/stereo/alarm-clock-elapsed.oga";
+    // Im AppImage zeigen diese Variablen auf die mitgebündelten Bibliotheken
+    // und GTK-Module; die Player sollen die des Systems verwenden.
+    const APPIMAGE_ENV: [&str; 7] = [
+        "GTK_PATH",
+        "GTK_EXE_PREFIX",
+        "GTK_DATA_PREFIX",
+        "GDK_PIXBUF_MODULE_FILE",
+        "GIO_MODULE_DIR",
+        "GSETTINGS_SCHEMA_DIR",
+        "LD_LIBRARY_PATH",
+    ];
+    std::thread::spawn(|| {
+        let players: [(&str, &[&str]); 3] = [
+            ("paplay", &[SOUND]),
+            ("pw-play", &[SOUND]),
+            ("canberra-gtk-play", &["-i", "alarm-clock-elapsed"]),
+        ];
+        for (cmd, args) in players {
+            let mut c = std::process::Command::new(cmd);
+            c.args(args);
+            for var in APPIMAGE_ENV {
+                c.env_remove(var);
+            }
+            if c.status().is_ok_and(|s| s.success()) {
+                return;
+            }
+        }
+    });
 }
 
 pub struct LinuxPlatform {
@@ -268,7 +476,7 @@ impl Platform for LinuxPlatform {
             // Tray-Icon in eigenem Thread; Menü-Aktionen kommen über den Kanal
             // und werden im GTK-Loop (build_ui) angewendet. Erst hier gestartet,
             // damit ein zweiter Prozess kein eigenes Icon anlegt.
-            let tray_rx = start_tray_service(settings);
+            let tray = start_tray_service(settings);
             build_ui(
                 app,
                 sheeps.clone(),
@@ -276,7 +484,7 @@ impl Platform for LinuxPlatform {
                 tick.clone(),
                 tick_ms,
                 settings,
-                tray_rx,
+                tray,
             );
         });
 
@@ -307,7 +515,7 @@ fn build_ui<SpawnFn, TickFn>(
     tick: Rc<RefCell<TickFn>>,
     tick_ms: u32,
     settings: Settings,
-    tray_rx: mpsc::Receiver<TrayCmd>,
+    tray: TrayLink,
 ) where
     SpawnFn: FnMut(usize) -> Sheep + 'static,
     TickFn: FnMut(&mut [Sheep], u32, &World) + 'static,
@@ -366,6 +574,21 @@ fn build_ui<SpawnFn, TickFn>(
     // gleichzeitig ist genug; multi-touch würden wir hier erweitern.
     let drag_state: Rc<RefCell<Option<DragState>>> = Rc::new(RefCell::new(None));
 
+    let timer_ui = Rc::new(RefCell::new(TimerUi::default()));
+    let TrayLink {
+        rx: tray_rx,
+        handle: tray,
+    } = tray;
+    // Zum Ausprobieren: DESKTOP_SHEEP_TIMER=<sekunden> startet gleich einen Timer.
+    if let Some(secs) = std::env::var("DESKTOP_SHEEP_TIMER")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        let mut ui = timer_ui.borrow_mut();
+        ui.timer.start(Duration::from_secs(secs), Instant::now());
+        ui.sync_tray(&tray);
+    }
+
     for (idx, monitor) in mons.iter().enumerate() {
         let title = format!("Desktop Sheep Overlay {}", idx);
         let geo = monitor.geometry();
@@ -393,8 +616,18 @@ fn build_ui<SpawnFn, TickFn>(
         {
             let sheeps_g = sheeps.clone();
             let ds = drag_state.clone();
+            let ui_g = timer_ui.clone();
+            let tray_g = tray.clone();
             drag.connect_drag_begin(move |_, x, y| {
                 let mut all = sheeps_g.borrow_mut();
+                // Während des Alarms nimmt das Overlay nur über den Schafen
+                // und der Blase Klicks an – jeder Klick quittiert.
+                let mut ui = ui_g.borrow_mut();
+                if ui.alarm.is_some() {
+                    ui.stop_alarm(&mut all);
+                    ui.sync_tray(&tray_g);
+                }
+                drop(ui);
                 for (i, s) in all.iter_mut().enumerate() {
                     if s.monitor_idx == my_idx && s.contains(x as f32, y as f32) {
                         let click_offset = (x as f32 - s.x, y as f32 - s.y);
@@ -513,6 +746,7 @@ fn build_ui<SpawnFn, TickFn>(
 
     // Tick-Loop
     let sheeps_tick = sheeps.clone();
+    let ui_tick = timer_ui.clone();
     let tick_cb = tick.clone();
     let overlays_tick = overlays.clone();
     let surfaces_tick = surfaces.clone();
@@ -547,35 +781,50 @@ fn build_ui<SpawnFn, TickFn>(
                 (tick_cb.borrow_mut())(&mut s, dt.max(1), &world);
             }
 
-            // Pro Overlay Sprites und Input-Region aktualisieren – beides nur,
-            // wenn sich etwas geändert hat. Nur der Sprite-Bereich ist klick-/
-            // dragbar, der Rest bleibt durchlässig.
+            // Pro Overlay Sprites, Sprechblasen und Input-Region aktualisieren
+            // – alles nur, wenn sich etwas geändert hat. Nur Sprites (und die
+            // Alarm-Blase) sind klick-/dragbar, der Rest bleibt durchlässig.
             {
                 let all = sheeps_tick.borrow();
+                let ui = ui_tick.borrow();
                 for (idx, oh) in overlays_tick.borrow().iter().enumerate() {
-                    let here = || all.iter().filter(|s| s.monitor_idx == idx);
-                    if let Some(a) = oh.area.upgrade() {
-                        let mut wanted = Vec::new();
-                        for s in here() {
-                            if let Some(p) = s.prop() {
-                                wanted.push(Placed {
-                                    key: (s.color, p.frame, p.mirrored),
-                                    x: p.x.round() as i32,
-                                    y: p.y.round() as i32,
-                                    alpha: p.alpha,
-                                });
-                            }
+                    let Some(a) = oh.area.upgrade() else {
+                        continue;
+                    };
+                    let mut wanted = Vec::new();
+                    let mut bubbles = Vec::new();
+                    let mut input = Vec::new();
+                    for (i, s) in all.iter().enumerate().filter(|(_, s)| s.monitor_idx == idx) {
+                        if let Some(p) = s.prop() {
                             wanted.push(Placed {
-                                key: (s.color, s.current_frame(), s.facing == Facing::Right),
-                                x: s.x.round() as i32,
-                                y: s.y.round() as i32,
-                                alpha: 1.0,
+                                key: (s.color, p.frame, p.mirrored),
+                                x: p.x.round() as i32,
+                                y: p.y.round() as i32,
+                                alpha: p.alpha,
                             });
                         }
-                        a.set_sprites(&wanted, &mut tiles);
+                        wanted.push(Placed {
+                            key: (s.color, s.current_frame(), s.facing == Facing::Right),
+                            x: s.x.round() as i32,
+                            y: s.y.round() as i32,
+                            alpha: 1.0,
+                        });
+                        input.push(s.hitbox());
+                        if let Some(text) = ui.bubble_text(i, now) {
+                            let (hx, _, hw, hh) = s.hitbox();
+                            let at = bubble::place(
+                                (hx, s.bubble_anchor_y().round() as i32, hw, hh),
+                                a.bubble_size(&text),
+                                (a.width(), a.height()),
+                            );
+                            if ui.alarm.is_some() {
+                                input.push(at.outer_rect());
+                            }
+                            bubbles.push(PlacedBubble { text, at });
+                        }
                     }
+                    a.set_scene(&wanted, bubbles, &mut tiles);
 
-                    let input: Vec<_> = here().map(|s| s.hitbox()).collect();
                     if last_input[idx].as_ref() == Some(&input) {
                         continue;
                     }
@@ -603,12 +852,21 @@ fn build_ui<SpawnFn, TickFn>(
     let walk_on_windows = Rc::new(Cell::new(settings.walk_on_windows));
     start_window_poller(overlays.clone(), surfaces.clone(), walk_on_windows.clone());
 
-    // Menü-Aktionen aus dem Tray-Thread anwenden.
+    // Mauszeiger: weckt schlafende Schafe und zeigt bei laufendem Timer,
+    // über welchem Schaf die Restzeit-Blase erscheint.
+    let pointer = Rc::new(RefCell::new(PointerPoller::new()));
+
+    // Menü-Aktionen aus dem Tray-Thread anwenden, Timer und Mauszeiger
+    // abfragen.
     let app_quit = app.downgrade();
     let sheeps_menu = sheeps.clone();
     let drag_menu = drag_state.clone();
+    let ui_menu = timer_ui.clone();
+    let pointer_menu = pointer.clone();
     let mut color = settings.color;
+    let mut last_tray_sync = Instant::now();
     glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+        let mut tray_dirty = false;
         while let Ok(cmd) = tray_rx.try_recv() {
             match cmd {
                 TrayCmd::Quit => {
@@ -624,6 +882,7 @@ fn build_ui<SpawnFn, TickFn>(
                         let i = all.len();
                         let mut s = (spawn.borrow_mut())(i);
                         color.apply_to(&mut s);
+                        s.set_alarm(ui_menu.borrow().alarm.is_some());
                         all.push(s);
                     }
                     // Wurde gerade das gezogene Schaf entfernt, die Geste verwerfen.
@@ -640,17 +899,52 @@ fn build_ui<SpawnFn, TickFn>(
                     }
                 }
                 TrayCmd::WalkOnWindows(on) => walk_on_windows.set(on),
+                TrayCmd::StartTimer(d) => {
+                    let mut ui = ui_menu.borrow_mut();
+                    ui.stop_alarm(&mut sheeps_menu.borrow_mut());
+                    ui.timer.start(d, Instant::now());
+                    tray_dirty = true;
+                }
+                TrayCmd::CancelTimer => {
+                    ui_menu.borrow_mut().timer.cancel();
+                    tray_dirty = true;
+                }
+                TrayCmd::StopAlarm => {
+                    ui_menu
+                        .borrow_mut()
+                        .stop_alarm(&mut sheeps_menu.borrow_mut());
+                    tray_dirty = true;
+                }
             }
+        }
+
+        let now = Instant::now();
+        let mut ui = ui_menu.borrow_mut();
+        if let Some(total) = ui.timer.poll(now) {
+            ui.fire(total, &mut sheeps_menu.borrow_mut());
+            tray_dirty = true;
+        }
+        ui.hovered = if ui.timer.is_running() {
+            let pos = pointer_menu
+                .borrow()
+                .as_ref()
+                .and_then(PointerPoller::query);
+            pos.and_then(|p| sheep_at(&sheeps_menu.borrow(), &mon_rects, p))
+        } else {
+            None
+        };
+        // Restzeit im Tray alle paar Sekunden nachführen.
+        if tray_dirty || (ui.timer.is_running() && now - last_tray_sync >= TRAY_TIMER_REFRESH) {
+            ui.sync_tray(&tray);
+            last_tray_sync = now;
         }
         glib::ControlFlow::Continue
     });
 
     // Cursor-Poller: bei Mausbewegung alle schlafenden Sheeps wecken.
-    let poller = PointerPoller::new();
     let sheeps_wake = sheeps.clone();
-    let poller_cell = Rc::new(RefCell::new(poller));
     glib::timeout_add_local(std::time::Duration::from_millis(300), move || {
-        if let Some(p) = poller_cell.borrow_mut().as_mut() {
+        if let Some(p) = pointer.borrow_mut().as_mut() {
             if p.moved_since_last() {
                 for s in sheeps_wake.borrow_mut().iter_mut() {
                     s.wake_from_sleep();
@@ -989,6 +1283,10 @@ struct DesktopSheepTray {
     tx: mpsc::Sender<TrayCmd>,
     /// Schaf-Icon in mehreren Größen (ARGB), einmal beim Start erzeugt.
     icons: Vec<ksni::Icon>,
+    /// Ablauf des laufenden Timers; vom GTK-Thread gesetzt.
+    timer_deadline: Option<Instant>,
+    /// Timer abgelaufen, Alarm noch nicht quittiert; vom GTK-Thread gesetzt.
+    alarm: bool,
 }
 
 impl DesktopSheepTray {
@@ -1000,7 +1298,7 @@ impl DesktopSheepTray {
             TrayCmd::SheepCount(n) => self.settings.n_sheep = n,
             TrayCmd::Color(c) => self.settings.color = c,
             TrayCmd::WalkOnWindows(on) => self.settings.walk_on_windows = on,
-            TrayCmd::Quit => {}
+            TrayCmd::StartTimer(_) | TrayCmd::CancelTimer | TrayCmd::StopAlarm | TrayCmd::Quit => {}
         }
         if self.settings != before {
             if let Err(e) = self.settings.save() {
@@ -1008,6 +1306,51 @@ impl DesktopSheepTray {
             }
         }
         let _ = self.tx.send(cmd);
+    }
+
+    /// Restzeit des laufenden Timers.
+    fn timer_left(&self) -> Option<Duration> {
+        self.timer_deadline
+            .map(|d| d.saturating_duration_since(Instant::now()))
+    }
+
+    /// Untermenü „Timer“: ggf. Abbrechen, dann die Dauern.
+    fn timer_menu(&self) -> ksni::MenuItem<Self> {
+        use ksni::menu::*;
+        let mut items: Vec<MenuItem<Self>> = Vec::new();
+        let label = match self.timer_left() {
+            Some(left) => {
+                items.push(
+                    StandardItem {
+                        label: "Timer abbrechen".into(),
+                        activate: Box::new(|tray: &mut Self| tray.apply(TrayCmd::CancelTimer)),
+                        ..Default::default()
+                    }
+                    .into(),
+                );
+                items.push(MenuItem::Separator);
+                format!("Timer (noch {})", timer::fmt_duration(left))
+            }
+            None => "Timer".into(),
+        };
+        for minutes in TIMER_MINUTES {
+            items.push(
+                StandardItem {
+                    label: format!("{minutes} min"),
+                    activate: Box::new(move |tray: &mut Self| {
+                        tray.apply(TrayCmd::StartTimer(Duration::from_secs(minutes * 60)));
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
+        SubMenu {
+            label,
+            submenu: items,
+            ..Default::default()
+        }
+        .into()
     }
 }
 
@@ -1023,7 +1366,13 @@ impl ksni::Tray for DesktopSheepTray {
     fn tool_tip(&self) -> ksni::ToolTip {
         ksni::ToolTip {
             title: "Desktop Sheep".into(),
-            description: "Overlay-Schafe laufen an der Bildschirmunterkante".into(),
+            description: if self.alarm {
+                "Zeit ist um!".into()
+            } else if let Some(left) = self.timer_left() {
+                format!("Timer: noch {}", timer::fmt_duration(left))
+            } else {
+                "Overlay-Schafe laufen an der Bildschirmunterkante".into()
+            },
             icon_name: String::new(),
             icon_pixmap: self.icons.clone(),
         }
@@ -1056,7 +1405,20 @@ impl ksni::Tray for DesktopSheepTray {
             })
             .collect();
 
-        vec![
+        let mut items = Vec::new();
+        if self.alarm {
+            items.push(
+                StandardItem {
+                    label: "Alarm beenden".into(),
+                    activate: Box::new(|tray: &mut Self| tray.apply(TrayCmd::StopAlarm)),
+                    ..Default::default()
+                }
+                .into(),
+            );
+            items.push(MenuItem::Separator);
+        }
+        items.push(self.timer_menu());
+        items.extend([
             SubMenu {
                 label: format!("Anzahl Schafe ({n})"),
                 submenu: vec![RadioGroup {
@@ -1106,7 +1468,8 @@ impl ksni::Tray for DesktopSheepTray {
                 ..Default::default()
             }
             .into(),
-        ]
+        ]);
+        items
     }
 }
 
@@ -1127,17 +1490,21 @@ fn desktop_file_item(label: &str, file: DesktopFile) -> ksni::MenuItem<DesktopSh
 }
 
 /// Startet den ksni-TrayService in einem eigenen Thread. Menü-Aktionen
-/// kommen über den zurückgegebenen Kanal beim GTK-Loop an.
-fn start_tray_service(settings: Settings) -> mpsc::Receiver<TrayCmd> {
+/// kommen über den Kanal beim GTK-Loop an, Anzeige-Änderungen gehen über
+/// das Handle zurück.
+fn start_tray_service(settings: Settings) -> TrayLink {
     let (tx, rx) = mpsc::channel();
     let tray = DesktopSheepTray {
         settings,
         tx,
         icons: tray_icons(),
+        timer_deadline: None,
+        alarm: false,
     };
     let service = ksni::TrayService::new(tray);
+    let handle = service.handle();
     service.spawn();
-    rx
+    TrayLink { rx, handle }
 }
 
 /// Größen, in denen das Tray-Icon angeboten wird; das Panel wählt die
