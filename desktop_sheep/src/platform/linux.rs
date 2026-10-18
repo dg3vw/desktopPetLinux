@@ -13,8 +13,9 @@ use gtk4::{Application, ApplicationWindow};
 
 use crate::core::anim::{frame_to_tile, SpriteColor, TILE_H, TILE_W};
 use crate::core::bubble::{self, BubblePlacement};
+use crate::core::fling::FlingTracker;
 use crate::core::geometry::Rect;
-use crate::core::sheep::{Facing, Sheep};
+use crate::core::sheep::{Beam, Facing, Sheep};
 use crate::core::surfaces::{walkable_surfaces, Surface};
 use crate::core::world::World;
 use crate::desktop_files::{DesktopFile, ICON_PNG};
@@ -116,6 +117,7 @@ mod canvas {
     pub struct SpriteCanvas {
         pub(super) sprites: RefCell<Vec<(Placed, gdk4::Texture)>>,
         pub(super) bubbles: RefCell<Vec<PlacedBubble>>,
+        pub(super) beams: RefCell<Vec<Beam>>,
     }
 
     #[glib::object_subclass]
@@ -152,6 +154,9 @@ mod canvas {
                     snapshot.pop();
                 }
             }
+            for b in self.beams.borrow().iter() {
+                draw_beam(snapshot, b);
+            }
             for b in self.bubbles.borrow().iter() {
                 draw_bubble(&self.obj(), snapshot, b);
             }
@@ -168,9 +173,16 @@ impl SpriteCanvas {
         glib::Object::new()
     }
 
-    /// Übernimmt Sprites und Sprechblasen dieses Overlays; neu gezeichnet
-    /// wird nur, wenn sich gegenüber dem letzten Frame etwas geändert hat.
-    fn set_scene(&self, wanted: &[Placed], bubbles: Vec<PlacedBubble>, tiles: &mut TileCache) {
+    /// Übernimmt Sprites, UFO-Strahlen und Sprechblasen dieses Overlays;
+    /// neu gezeichnet wird nur, wenn sich gegenüber dem letzten Frame etwas
+    /// geändert hat.
+    fn set_scene(
+        &self,
+        wanted: &[Placed],
+        beams: Vec<Beam>,
+        bubbles: Vec<PlacedBubble>,
+        tiles: &mut TileCache,
+    ) {
         let imp = self.imp();
         let same_sprites = imp
             .sprites
@@ -178,7 +190,7 @@ impl SpriteCanvas {
             .iter()
             .map(|(p, _)| p)
             .eq(wanted.iter());
-        if same_sprites && *imp.bubbles.borrow() == bubbles {
+        if same_sprites && *imp.beams.borrow() == beams && *imp.bubbles.borrow() == bubbles {
             return;
         }
         if !same_sprites {
@@ -187,6 +199,7 @@ impl SpriteCanvas {
                 .filter_map(|&p| Some((p, tiles.get(p.key)?)))
                 .collect();
         }
+        *imp.beams.borrow_mut() = beams;
         *imp.bubbles.borrow_mut() = bubbles;
         self.queue_draw();
     }
@@ -281,6 +294,48 @@ fn draw_bubble(widget: &SpriteCanvas, snapshot: &gtk4::Snapshot, b: &PlacedBubbl
     snapshot.restore();
 }
 
+/// Breite des UFO-Lichtkegels oben (an den Lampen) und unten (am Boden).
+const BEAM_TOP_W: f64 = 26.0;
+const BEAM_BOTTOM_W: f64 = 64.0;
+
+/// Zeichnet den Lichtkegel des UFOs: ein nach unten breiter werdendes,
+/// halbtransparentes Trapez mit Lichtfleck am Boden.
+fn draw_beam(snapshot: &gtk4::Snapshot, b: &Beam) {
+    use gtk4::graphene;
+    let (x, top, bottom) = (b.x as f64, b.top as f64, b.bottom as f64);
+    let i = b.intensity as f64;
+    let half = BEAM_BOTTOM_W / 2.0 + 2.0;
+    let cr = snapshot.append_cairo(&graphene::Rect::new(
+        (x - half) as f32,
+        top as f32,
+        (2.0 * half) as f32,
+        (bottom - top + 6.0) as f32,
+    ));
+
+    cr.move_to(x - BEAM_TOP_W / 2.0, top);
+    cr.line_to(x + BEAM_TOP_W / 2.0, top);
+    cr.line_to(x + BEAM_BOTTOM_W / 2.0, bottom);
+    cr.line_to(x - BEAM_BOTTOM_W / 2.0, bottom);
+    cr.close_path();
+    let fill = cairo::LinearGradient::new(0.0, top, 0.0, bottom);
+    fill.add_color_stop_rgba(0.0, 1.0, 1.0, 0.75, 0.6 * i);
+    fill.add_color_stop_rgba(1.0, 0.8, 1.0, 0.7, 0.25 * i);
+    cr.set_source(&fill).ok();
+    cr.fill().ok();
+
+    // Lichtfleck am Boden.
+    cr.save().ok();
+    cr.translate(x, bottom);
+    cr.scale(BEAM_BOTTOM_W / 2.0, 4.0);
+    let glow = cairo::RadialGradient::new(0.0, 0.0, 0.0, 0.0, 0.0, 1.0);
+    glow.add_color_stop_rgba(0.0, 1.0, 1.0, 0.75, 0.6 * i);
+    glow.add_color_stop_rgba(1.0, 1.0, 1.0, 0.75, 0.0);
+    cr.arc(0.0, 0.0, 1.0, 0.0, std::f64::consts::TAU);
+    cr.set_source(&glow).ok();
+    cr.fill().ok();
+    cr.restore().ok();
+}
+
 /// Zustand einer laufenden Drag-Geste.
 struct DragState {
     sheep_idx: usize,
@@ -290,6 +345,16 @@ struct DragState {
     /// Bewegung über Monitor-Grenzen hinweg absolute Positionen berechnen
     /// und den passenden Ziel-Monitor bestimmen können.
     start_root: (i32, i32),
+    /// Beginn der Geste – Zeitbasis für `fling`.
+    started: Instant,
+    /// Letzte Cursorpositionen (Root) für den Schwung beim Loslassen.
+    fling: FlingTracker,
+}
+
+impl DragState {
+    fn ms(&self) -> f64 {
+        self.started.elapsed().as_secs_f64() * 1000.0
+    }
 }
 
 /// Im Tray-Menü geänderte Einstellung, die der GTK-Thread live übernimmt.
@@ -631,11 +696,16 @@ fn build_ui<SpawnFn, TickFn>(
                 for (i, s) in all.iter_mut().enumerate() {
                     if s.monitor_idx == my_idx && s.contains(x as f32, y as f32) {
                         let click_offset = (x as f32 - s.x, y as f32 - s.y);
+                        let start_root = (start_mon_x + x as i32, start_mon_y + y as i32);
                         s.start_drag();
+                        let mut fling = FlingTracker::default();
+                        fling.push(0.0, start_root.0 as f32, start_root.1 as f32);
                         *ds.borrow_mut() = Some(DragState {
                             sheep_idx: i,
                             click_offset,
-                            start_root: (start_mon_x + x as i32, start_mon_y + y as i32),
+                            start_root,
+                            started: Instant::now(),
+                            fling,
                         });
                         break;
                     }
@@ -648,9 +718,17 @@ fn build_ui<SpawnFn, TickFn>(
             let mon_rects_c = mon_rects.clone();
             drag.connect_drag_update(move |_, dx, dy| {
                 let state_snapshot = {
-                    let st = ds.borrow();
-                    match st.as_ref() {
-                        Some(s) => (s.sheep_idx, s.click_offset, s.start_root),
+                    let mut st = ds.borrow_mut();
+                    match st.as_mut() {
+                        Some(s) => {
+                            let t = s.ms();
+                            s.fling.push(
+                                t,
+                                s.start_root.0 as f32 + dx as f32,
+                                s.start_root.1 as f32 + dy as f32,
+                            );
+                            (s.sheep_idx, s.click_offset, s.start_root)
+                        }
                         None => return,
                     }
                 };
@@ -696,7 +774,8 @@ fn build_ui<SpawnFn, TickFn>(
                 let mut st = ds.borrow_mut();
                 if let Some(state) = st.take() {
                     if let Some(s) = sheeps_g.borrow_mut().get_mut(state.sheep_idx) {
-                        s.end_drag();
+                        let (vx, vy) = state.fling.velocity(state.ms());
+                        s.end_drag(vx, vy);
                     }
                 }
             });
@@ -792,22 +871,34 @@ fn build_ui<SpawnFn, TickFn>(
                         continue;
                     };
                     let mut wanted = Vec::new();
+                    let mut front = Vec::new();
+                    let mut beams = Vec::new();
                     let mut bubbles = Vec::new();
                     let mut input = Vec::new();
                     for (i, s) in all.iter().enumerate().filter(|(_, s)| s.monitor_idx == idx) {
                         if let Some(p) = s.prop() {
-                            wanted.push(Placed {
+                            let placed = Placed {
                                 key: (s.color, p.frame, p.mirrored),
                                 x: p.x.round() as i32,
                                 y: p.y.round() as i32,
                                 alpha: p.alpha,
-                            });
+                            };
+                            if p.in_front() {
+                                front.push(placed);
+                            } else {
+                                wanted.push(placed);
+                            }
+                        }
+                        beams.extend(s.beam());
+                        // Vom UFO entführt: weder zu sehen noch zu fassen.
+                        if s.alpha() <= 0.0 {
+                            continue;
                         }
                         wanted.push(Placed {
                             key: (s.color, s.current_frame(), s.facing == Facing::Right),
                             x: s.x.round() as i32,
                             y: s.y.round() as i32,
-                            alpha: 1.0,
+                            alpha: s.alpha(),
                         });
                         input.push(s.hitbox());
                         if let Some(text) = ui.bubble_text(i, now) {
@@ -823,7 +914,8 @@ fn build_ui<SpawnFn, TickFn>(
                             bubbles.push(PlacedBubble { text, at });
                         }
                     }
-                    a.set_scene(&wanted, bubbles, &mut tiles);
+                    wanted.append(&mut front);
+                    a.set_scene(&wanted, beams, bubbles, &mut tiles);
 
                     if last_input[idx].as_ref() == Some(&input) {
                         continue;

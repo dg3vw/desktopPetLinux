@@ -53,9 +53,31 @@ const MEET_DISTANCE: f32 = 55.0;
 /// umzudrehen – im Gehen bzw. im Sprint.
 const LEAP_PERCENT_WALK: u32 = 40;
 const LEAP_PERCENT_RUN: u32 = 75;
+/// So weit (Pixel, Sprite-Mitten) landet ein Bocksprung mindestens vor dem
+/// übersprungenen Schaf – auch wenn das in dieselbe Richtung weiterläuft.
+const LEAP_CLEARANCE: f32 = TILE_W as f32 + 8.0;
 /// Höhenunterschied (Pixel), bis zu dem zwei Schafe als auf derselben
 /// Fläche stehend gelten.
 const SAME_LEVEL_PX: f32 = 4.0;
+/// UFO-Entführung: Abstand der UFO- zur Schaf-Oberkante beim Schweben und
+/// seitlicher Versatz des Anflugs (Pixel).
+const UFO_HOVER_PX: f32 = 170.0;
+const UFO_APPROACH_DX: f32 = 320.0;
+/// Auf und ab beim Schweben (Pixel).
+const UFO_BOB_PX: f32 = 3.0;
+/// Unterkante der Lampen im UFO-Sprite – hier beginnt der Lichtkegel.
+const UFO_BEAM_TOP: f32 = 37.0;
+/// Hochziehen im Strahl: Beschleunigung (px/s²) und Höchstgeschwindigkeit (px/s).
+const UFO_LIFT_ACCEL: f32 = 80.0;
+const UFO_LIFT_SPEED: f32 = 110.0;
+/// Das Schaf taucht hinter der UFO-Unterseite ein und ist ausgeblendet,
+/// sobald seine Oberkante `UFO_SWALLOW_PX` unter der des UFOs liegt;
+/// die Blende beginnt `UFO_FADE_PX` früher.
+const UFO_SWALLOW_PX: f32 = 8.0;
+const UFO_FADE_PX: f32 = 22.0;
+/// Abflug: seitlich (px/s) und nach oben beschleunigend (px/s²).
+const UFO_FLEE_VX: f32 = 90.0;
+const UFO_FLEE_ACCEL: f32 = 600.0;
 
 /// Wie ein Schaf (neu) ins Bild kommt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +89,8 @@ pub enum Entry {
     /// Läuft von der Seite herein und trifft ein schwarzes Schaf
     /// (Original: spawn id 4).
     Visit,
+    /// Steht schon am Boden, und gleich kommt das UFO (zum Ausprobieren).
+    Ufo,
 }
 
 impl Entry {
@@ -75,6 +99,7 @@ impl Entry {
             "sky" => Self::Sky,
             "bath" => Self::Bath,
             "visit" => Self::Visit,
+            "ufo" => Self::Ufo,
             _ => return None,
         })
     }
@@ -84,10 +109,11 @@ impl Entry {
 enum PropKind {
     Tub,
     BlackSheep,
+    Ufo,
 }
 
 /// Zweites Sprite, das zu einem Schaf gehört (Original: `child`) – die
-/// Badewanne oder das schwarze Schaf. Liegt auf demselben Monitor.
+/// Badewanne, das schwarze Schaf oder das UFO. Liegt auf demselben Monitor.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Prop {
     pub x: f32,
@@ -98,6 +124,43 @@ pub struct Prop {
     /// Deckkraft 0..1.
     pub alpha: f32,
     kind: PropKind,
+    /// Abfluggeschwindigkeit des UFOs (Pixel pro Sekunde).
+    vx: f32,
+    vy: f32,
+    /// Lebensdauer bisher (ms) – Takt für Lichter und Schweben des UFOs.
+    age_ms: u32,
+}
+
+impl Prop {
+    fn new(kind: PropKind, x: f32, y: f32, frame: u32, mirrored: bool) -> Self {
+        Self {
+            x,
+            y,
+            frame,
+            mirrored,
+            alpha: 1.0,
+            kind,
+            vx: 0.0,
+            vy: 0.0,
+            age_ms: 0,
+        }
+    }
+
+    /// Wird über dem Schaf gezeichnet: Das UFO verschluckt es.
+    pub fn in_front(&self) -> bool {
+        self.kind == PropKind::Ufo
+    }
+}
+
+/// Lichtkegel unter dem UFO (Overlay-lokal).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Beam {
+    /// Mitte in x.
+    pub x: f32,
+    pub top: f32,
+    pub bottom: f32,
+    /// Helligkeit 0..1 – blendet ein und flackert leicht.
+    pub intensity: f32,
 }
 
 pub struct Sheep {
@@ -136,8 +199,14 @@ pub struct Sheep {
     prop_ttl_ms: Option<u32>,
     /// Treffpunkt beim Besuch des schwarzen Schafs (x, Overlay-lokal).
     meet_x: f32,
+    /// UFO-Entführung: Start- und Schwebeposition des UFOs (Overlay-lokal).
+    ufo_from: (f32, f32),
+    ufo_hover: (f32, f32),
     /// Timer abgelaufen: hüpft auf der Stelle, sobald es irgendwo steht.
     alarm: bool,
+    /// Weite des laufenden Bocksprungs (Pixel pro 16-ms-Tick, nach
+    /// SPEED_SCALE) – größer, wenn das übersprungene Schaf davonläuft.
+    jump_px_per_tick: f32,
     anim: AnimId,
     frame_idx: usize,
     frame_elapsed_ms: u32,
@@ -168,7 +237,10 @@ impl Sheep {
             prop: None,
             prop_ttl_ms: None,
             meet_x: 0.0,
+            ufo_from: (0.0, 0.0),
+            ufo_hover: (0.0, 0.0),
             alarm: false,
+            jump_px_per_tick: Self::jump_distance() / Self::jump_ticks(),
             anim: AnimId::Walk,
             frame_idx: 0,
             frame_elapsed_ms: 0,
@@ -191,10 +263,42 @@ impl Sheep {
         self.pending_entry = Some(entry);
     }
 
-    /// Badewanne bzw. schwarzes Schaf, falls gerade sichtbar – wird vor
-    /// dem Schaf gezeichnet.
+    /// Badewanne, schwarzes Schaf oder UFO, falls gerade sichtbar – wird
+    /// vor dem Schaf gezeichnet, außer `Prop::in_front`.
     pub fn prop(&self) -> Option<&Prop> {
         self.prop.as_ref()
+    }
+
+    /// Lichtkegel des UFOs, solange es das Schaf anstrahlt.
+    pub fn beam(&self) -> Option<Beam> {
+        if !matches!(self.anim, AnimId::UfoSpotted | AnimId::UfoBeam) {
+            return None;
+        }
+        let ufo = self.prop.filter(|p| p.kind == PropKind::Ufo)?;
+        let fade_in = if self.anim == AnimId::UfoSpotted {
+            (self.anim_progress() * 4.0).min(1.0)
+        } else {
+            1.0
+        };
+        let flicker = 0.85 + 0.15 * (ufo.age_ms as f32 / 70.0).sin();
+        Some(Beam {
+            x: ufo.x + TILE_W as f32 / 2.0,
+            top: ufo.y + UFO_BEAM_TOP,
+            bottom: self.ufo_hover.1 + UFO_HOVER_PX + TILE_H as f32,
+            intensity: fade_in * flicker,
+        })
+    }
+
+    /// Deckkraft des Schafs: Beim Entführen verschwindet es im UFO.
+    pub fn alpha(&self) -> f32 {
+        match self.anim {
+            AnimId::UfoBeam => {
+                let ufo_y = self.prop.map_or(self.ufo_hover.1, |p| p.y);
+                ((self.y - ufo_y - UFO_SWALLOW_PX) / UFO_FADE_PX).clamp(0.0, 1.0)
+            }
+            AnimId::UfoGone => 0.0,
+            _ => 1.0,
+        }
     }
 
     /// Aktuell zu zeichnender Frame-Index im Sprite-Sheet.
@@ -234,7 +338,11 @@ impl Sheep {
 
     /// Trefft der Punkt (mx, my) das Sprite?
     pub fn contains(&self, mx: f32, my: f32) -> bool {
-        mx >= self.x && mx < self.x + TILE_W as f32 && my >= self.y && my < self.y + TILE_H as f32
+        self.alpha() > 0.0
+            && mx >= self.x
+            && mx < self.x + TILE_W as f32
+            && my >= self.y
+            && my < self.y + TILE_H as f32
     }
 
     /// Bricht den Schlaf-Loop ab und wechselt sofort zur WakeUp-Animation.
@@ -293,6 +401,7 @@ impl Sheep {
                     | AnimId::LookDown
                     | AnimId::JumpDownLand
                     | AnimId::FallWinD
+                    | AnimId::UfoArrive
             )
     }
 
@@ -307,16 +416,27 @@ impl Sheep {
         self.hang_offset = 0.0;
         self.leaving = false;
         self.pending_entry = None;
-        self.prop = None;
+        // Ein UFO fliegt ohne Beute davon; Wanne und schwarzes Schaf verschwinden.
+        self.prop = self.prop.filter(|p| p.kind == PropKind::Ufo);
         self.prop_ttl_ms = None;
         self.set_anim(AnimId::Drag);
     }
 
-    /// User hat losgelassen: fällt mit Gravitation, bounct, landet – auf dem
-    /// Boden oder auf einer Fensterkante darunter.
-    pub fn end_drag(&mut self) {
+    /// User hat losgelassen: fliegt mit dem Schwung der Mausbewegung
+    /// `(vx, vy)` (Pixel pro Sekunde) im Bogen weiter, fällt, bounct, landet –
+    /// auf dem Boden oder auf einer Fensterkante darunter.
+    pub fn end_drag(&mut self, vx: f32, vy: f32) {
         self.dragged = false;
         self.set_anim(AnimId::Fall);
+        self.vx = vx;
+        self.vy = vy;
+        if vx.abs() > 50.0 {
+            self.facing = if vx > 0.0 {
+                Facing::Right
+            } else {
+                Facing::Left
+            };
+        }
     }
 
     /// Setzt die Position (samt Ziel-Monitor). Nur während Drag sinnvoll.
@@ -340,7 +460,9 @@ impl Sheep {
     /// zwischen Umdrehen, Runterspringen und Abrutschen.
     pub fn tick(&mut self, dt_ms: u32, segments: &[GroundSegment], world: &World) {
         if let Some(entry) = self.pending_entry {
-            if world.dims(self.monitor_idx).1 > 0 {
+            // Der Auftritt wählt einen zufälligen Monitor – erst starten,
+            // wenn alle Overlays ihre Maße kennen.
+            if !world.area_dims.is_empty() && world.area_dims.iter().all(|&(_, h)| h > 0) {
                 self.pending_entry = None;
                 self.start_entry(entry, world);
             }
@@ -401,6 +523,17 @@ impl Sheep {
             }
             AnimId::VisitRun | AnimId::VisitWalk => {
                 self.tick_visit(dt_ms, world);
+                return;
+            }
+            AnimId::UfoBeam => {
+                self.tick_ufo_lift(dt_ms);
+                return;
+            }
+            AnimId::UfoGone => {
+                // Wieder auftreten, sobald das UFO aus dem Bild ist.
+                if self.prop.is_none() {
+                    self.respawn(world);
+                }
                 return;
             }
             _ => {}
@@ -467,12 +600,17 @@ impl Sheep {
         }
     }
 
-    /// Parabelbogen über die Dauer der aktuellen Animation mit Scheitel `height`.
-    fn hop_arc(&self, height: f32) -> f32 {
+    /// Fortschritt 0..1 durch einen Durchlauf der aktuellen Animation.
+    fn anim_progress(&self) -> f32 {
         let cur = def(self.anim);
         let total = (cur.frames.len() as u32 * cur.interval_ms) as f32;
         let t = self.frame_idx as u32 * cur.interval_ms + self.frame_elapsed_ms;
-        let p = (t as f32 / total).clamp(0.0, 1.0);
+        (t as f32 / total).clamp(0.0, 1.0)
+    }
+
+    /// Parabelbogen über die Dauer der aktuellen Animation mit Scheitel `height`.
+    fn hop_arc(&self, height: f32) -> f32 {
+        let p = self.anim_progress();
         4.0 * height * p * (1.0 - p)
     }
 
@@ -514,14 +652,7 @@ impl Sheep {
                 let tub_x = x0 + self.forward() * d;
                 self.x = x0;
                 self.y = floor - d;
-                self.prop = Some(Prop {
-                    x: tub_x,
-                    y: floor,
-                    frame: 146,
-                    mirrored: false,
-                    alpha: 1.0,
-                    kind: PropKind::Tub,
-                });
+                self.prop = Some(Prop::new(PropKind::Tub, tub_x, floor, 146, false));
                 self.set_anim(AnimId::BathFly);
             }
             Entry::Visit if aw >= 4 * TILE_W as i32 => {
@@ -535,15 +666,19 @@ impl Sheep {
                     -(TILE_W as f32)
                 };
                 self.y = floor;
-                self.prop = Some(Prop {
-                    x: 0.0,
-                    y: floor,
-                    frame: 155,
-                    mirrored: !from_right,
-                    alpha: 1.0,
-                    kind: PropKind::BlackSheep,
-                });
+                self.prop = Some(Prop::new(
+                    PropKind::BlackSheep,
+                    0.0,
+                    floor,
+                    155,
+                    !from_right,
+                ));
                 self.set_anim(AnimId::VisitRun);
+            }
+            Entry::Ufo if floor >= UFO_HOVER_PX => {
+                self.x = self.rng.range((aw - TILE_W as i32).max(1) as u32) as f32;
+                self.y = floor;
+                self.set_anim(AnimId::UfoArrive);
             }
             _ => {
                 let x = self.rng.range((aw - TILE_W as i32).max(1) as u32) as f32;
@@ -589,6 +724,18 @@ impl Sheep {
         }
     }
 
+    /// Im Strahl: beschleunigt nach oben, bis das Schaf im UFO verschwunden ist.
+    fn tick_ufo_lift(&mut self, dt_ms: u32) {
+        let dt_s = dt_ms as f32 / 1000.0;
+        self.vy = (self.vy - UFO_LIFT_ACCEL * dt_s).max(-UFO_LIFT_SPEED);
+        self.y += self.vy * dt_s;
+        self.x = self.ufo_hover.0;
+        if self.alpha() <= 0.0 {
+            self.vy = 0.0;
+            self.set_anim(AnimId::UfoGone);
+        }
+    }
+
     /// Prop an den Zustand des Schafs anpassen und ggf. ablaufen lassen.
     fn update_prop(&mut self, dt_ms: u32) {
         if let Some(ttl) = self.prop_ttl_ms {
@@ -605,7 +752,10 @@ impl Sheep {
         let ttl = self.prop_ttl_ms;
         let white_x = self.x;
         let meet = self.meet_x;
+        let progress = self.anim_progress();
+        let (from, hover) = (self.ufo_from, self.ufo_hover);
         let Some(p) = self.prop.as_mut() else { return };
+        p.age_ms = p.age_ms.saturating_add(dt_ms);
         match p.kind {
             PropKind::Tub => {
                 p.frame = if anim == AnimId::BathSoak {
@@ -630,12 +780,62 @@ impl Sheep {
                 }
                 p.alpha = ttl.map_or(1.0, |t| (t as f32 / FADE_MS as f32).min(1.0));
             }
+            PropKind::Ufo => {
+                let bob = UFO_BOB_PX * (p.age_ms as f32 / 400.0).sin();
+                match anim {
+                    AnimId::UfoArrive => {
+                        // Schräg von oben heran, kurz vor dem Ziel abbremsen.
+                        let e = 1.0 - (1.0 - progress).powi(2);
+                        p.x = from.0 + (hover.0 - from.0) * e;
+                        p.y = from.1 + (hover.1 - from.1) * e + bob * e;
+                    }
+                    AnimId::UfoSpotted | AnimId::UfoBeam => {
+                        p.x = hover.0;
+                        p.y = hover.1 + bob;
+                    }
+                    _ => {
+                        // Mit Beute an Bord – oder ohne, wenn sie ihm aus
+                        // dem Strahl gezogen wurde – davonfliegen.
+                        let dt_s = dt_ms as f32 / 1000.0;
+                        p.vy -= UFO_FLEE_ACCEL * dt_s;
+                        p.x += p.vx * dt_s;
+                        p.y += p.vy * dt_s;
+                        if p.y < -(TILE_H as f32) {
+                            self.prop = None;
+                            return;
+                        }
+                    }
+                }
+                // Mit Strahl blinken die Lampen (162–165), sonst dreht sich
+                // nur die Spiegelung (158–161).
+                let base = if matches!(anim, AnimId::UfoSpotted | AnimId::UfoBeam) {
+                    162
+                } else {
+                    158
+                };
+                p.frame = base + (p.age_ms / 100) % 4;
+            }
         }
     }
 
     /// Laufstrecke der aktuellen Animation in `dt_ms` (ohne Richtung).
     fn step_px(&self, dt_ms: u32) -> f32 {
-        def(self.anim).dx_per_tick as f32 * SPEED_SCALE * (dt_ms as f32 / 16.0)
+        let per_tick = if self.anim == AnimId::Jump {
+            self.jump_px_per_tick
+        } else {
+            def(self.anim).dx_per_tick as f32 * SPEED_SCALE
+        };
+        per_tick * (dt_ms as f32 / 16.0)
+    }
+
+    /// Laufgeschwindigkeit über Grund (Pixel pro 16-ms-Tick, Vorzeichen =
+    /// Bildschirmrichtung); 0 beim Fallen und Ziehen.
+    fn ground_speed(&self) -> f32 {
+        if self.falling || self.dragged {
+            0.0
+        } else {
+            self.step_px(16) * self.forward()
+        }
     }
 
     fn forward(&self) -> f32 {
@@ -672,6 +872,7 @@ impl Sheep {
                 self.hang_offset = TILE_H as f32 * 0.45;
             }
             AnimId::FallWinC => self.start_fall(Some(AnimId::FallWinD)),
+            AnimId::Jump => self.jump_px_per_tick = Self::jump_distance() / Self::jump_ticks(),
             AnimId::Fall | AnimId::FallPanic => self.start_fall(None),
             AnimId::BathOut => {
                 let out = def(AnimId::BathOut);
@@ -680,6 +881,28 @@ impl Sheep {
             AnimId::VisitBlush => {
                 let blush = def(AnimId::VisitBlush);
                 self.prop_ttl_ms = Some(blush.frames.len() as u32 * blush.interval_ms + FADE_MS);
+            }
+            AnimId::UfoArrive => {
+                // Zu nah an der Bildschirmoberkante, beim Alarm oder solange
+                // noch ein anderes Prop zu sehen ist: kein UFO, weiterlaufen.
+                let hover_y = self.y - UFO_HOVER_PX;
+                if hover_y < 0.0 || self.alarm || self.prop.is_some() {
+                    self.set_anim(AnimId::Walk);
+                    return;
+                }
+                let side = if self.rng.range(2) == 0 { -1.0 } else { 1.0 };
+                self.ufo_hover = (self.x, hover_y);
+                self.ufo_from = (self.x + side * UFO_APPROACH_DX, -(TILE_H as f32));
+                let mut ufo =
+                    Prop::new(PropKind::Ufo, self.ufo_from.0, self.ufo_from.1, 158, false);
+                // Fliegt später in Anflugrichtung weiter.
+                ufo.vx = -side * UFO_FLEE_VX;
+                self.prop = Some(ufo);
+                self.prop_ttl_ms = None;
+            }
+            AnimId::UfoBeam => {
+                self.support = None;
+                self.vy = 0.0;
             }
             _ => {}
         }
@@ -966,6 +1189,8 @@ impl Sheep {
         const GRAVITY: f32 = 2400.0; // Pixel pro Sekunde²
         const BOUNCE_DAMP: f32 = 0.42;
         const BOUNCE_STOP: f32 = 80.0; // Pixel pro Sekunde – kleiner ⇒ landen
+        const SLIDE_DAMP: f32 = 0.6; // Restschwung seitwärts je Aufsetzer
+        const WALL_BOUNCE: f32 = 0.5; // Restschwung nach dem Abprallen
 
         let (aw, ah) = world.dims(self.monitor_idx);
         if ah <= 0 {
@@ -980,8 +1205,16 @@ impl Sheep {
         self.x += self.vx * dt_s;
         let max_x = (aw - TILE_W as i32).max(0) as f32;
         if self.x < 0.0 || self.x > max_x {
+            // Geworfen an den Bildschirmrand: abprallen.
             self.x = self.x.clamp(0.0, max_x);
-            self.vx = 0.0;
+            self.vx = -self.vx * WALL_BOUNCE;
+            if self.vx.abs() > 50.0 {
+                self.facing = if self.vx > 0.0 {
+                    Facing::Right
+                } else {
+                    Facing::Left
+                };
+            }
         }
         if self.vy <= 0.0 {
             return; // steigt noch
@@ -1007,6 +1240,7 @@ impl Sheep {
         if self.land_anim.is_none() && self.vy > BOUNCE_STOP {
             // bouncen – Richtung umkehren, Energie verlieren
             self.vy = -self.vy * BOUNCE_DAMP;
+            self.vx *= SLIDE_DAMP;
             return;
         }
 
@@ -1042,6 +1276,7 @@ impl Sheep {
     /// Fläche steht (Abstand der Sprite-Mitten); `None`, wenn nicht.
     fn ahead_on_level(&self, other: &Sheep) -> Option<f32> {
         if other.monitor_idx != self.monitor_idx
+            || other.alpha() <= 0.0
             || other.falling
             || other.dragged
             || other.support != self.support
@@ -1053,18 +1288,31 @@ impl Sheep {
         (ahead > 0.0).then_some(ahead)
     }
 
-    /// Strecke, die der Bocksprung zurücklegt.
-    fn jump_distance() -> f32 {
+    /// Dauer des Bocksprungs in 16-ms-Ticks.
+    fn jump_ticks() -> f32 {
         let jump = def(AnimId::Jump);
-        let ticks = (jump.frames.len() as u32 * jump.interval_ms) as f32 / 16.0;
-        jump.dx_per_tick as f32 * SPEED_SCALE * ticks
+        (jump.frames.len() as u32 * jump.interval_ms) as f32 / 16.0
     }
 
-    /// Ist hinter dem Hindernis genug Platz, um nach dem Bocksprung noch auf
-    /// derselben Fläche zu landen?
-    fn room_to_leap(&self, world: &World) -> bool {
+    /// Strecke, die ein gewöhnlicher Bocksprung zurücklegt.
+    fn jump_distance() -> f32 {
+        def(AnimId::Jump).dx_per_tick as f32 * SPEED_SCALE * Self::jump_ticks()
+    }
+
+    /// Nötige Sprungweite über ein Schaf `ahead` Pixel voraus, das mit
+    /// `other_speed` (Pixel pro Tick, Bildschirmrichtung) unterwegs ist:
+    /// Läuft es in dieselbe Richtung, muss der Sprung um seinen Vorsprung
+    /// bei der Landung weiter reichen.
+    fn leap_distance(&self, ahead: f32, other_speed: f32) -> f32 {
+        let drift = (other_speed * self.forward()).max(0.0) * Self::jump_ticks();
+        (ahead + drift + LEAP_CLEARANCE).max(Self::jump_distance())
+    }
+
+    /// Ist hinter dem Hindernis genug Platz, um nach einem Bocksprung über
+    /// `distance` Pixel noch auf derselben Fläche zu landen?
+    fn room_to_leap(&self, world: &World, distance: f32) -> bool {
         let half = TILE_W as f32 / 2.0;
-        let land = self.x + half + self.forward() * Self::jump_distance();
+        let land = self.x + half + self.forward() * distance;
         match self.support {
             Some(window) => self.find_support(window, world).is_some_and(|s| {
                 land >= s.x_start as f32 + EDGE_MARGIN && land <= s.x_end as f32 - EDGE_MARGIN
@@ -1076,15 +1324,24 @@ impl Sheep {
         }
     }
 
-    /// Ein Schaf steht im Weg: drüberspringen oder umdrehen. Springt das
-    /// andere gerade selbst, wird umgedreht – sonst treffen sie sich in der Luft.
-    fn meet_sheep(&mut self, other_jumping: bool, world: &World) {
+    /// Ein Schaf `ahead` Pixel voraus ist im Weg: drüberspringen oder
+    /// umdrehen. Springt das andere gerade selbst, wird umgedreht – sonst
+    /// treffen sie sich in der Luft.
+    fn meet_sheep(&mut self, ahead: f32, other_speed: f32, other_jumping: bool, world: &World) {
         let leap_percent = match self.anim {
             AnimId::Run | AnimId::RunBegin => LEAP_PERCENT_RUN,
             _ => LEAP_PERCENT_WALK,
         };
-        let leap = !other_jumping && self.rng.range(100) < leap_percent && self.room_to_leap(world);
-        self.set_anim(if leap { AnimId::Jump } else { AnimId::Rotate1A });
+        let distance = self.leap_distance(ahead, other_speed);
+        let leap = !other_jumping
+            && self.rng.range(100) < leap_percent
+            && self.room_to_leap(world, distance);
+        if leap {
+            self.set_anim(AnimId::Jump);
+            self.jump_px_per_tick = distance / Self::jump_ticks();
+        } else {
+            self.set_anim(AnimId::Rotate1A);
+        }
     }
 
     /// Versucht, in Bewegungsrichtung auf den Nachbarmonitor zu wechseln.
@@ -1148,11 +1405,17 @@ pub fn avoid_collisions(sheeps: &mut [Sheep], world: &World) {
             .iter()
             .enumerate()
             .filter(|&(j, _)| j != i)
-            .filter_map(|(_, o)| Some((me.ahead_on_level(o)?, o.anim == AnimId::Jump)))
-            .filter(|&(ahead, _)| ahead <= MEET_DISTANCE)
+            .filter_map(|(_, o)| {
+                Some((
+                    me.ahead_on_level(o)?,
+                    o.ground_speed(),
+                    o.anim == AnimId::Jump,
+                ))
+            })
+            .filter(|&(ahead, _, _)| ahead <= MEET_DISTANCE)
             .min_by(|a, b| a.0.total_cmp(&b.0));
-        if let Some((_, other_jumping)) = nearest {
-            sheeps[i].meet_sheep(other_jumping, world);
+        if let Some((ahead, other_speed, other_jumping)) = nearest {
+            sheeps[i].meet_sheep(ahead, other_speed, other_jumping, world);
         }
     }
 }
@@ -1539,6 +1802,101 @@ mod tests {
     }
 
     #[test]
+    fn leap_over_sheep_running_ahead_lands_in_front() {
+        let none: Vec<Vec<Surface>> = vec![vec![]];
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &none,
+        };
+        let mut leaps = 0;
+        for seed in 0..40 {
+            for slow in [AnimId::Walk, AnimId::Run] {
+                // Beide nach rechts; das hintere sprintet auf das vordere auf.
+                let mut pair = facing_each_other(seed, AnimId::Run);
+                (pair[0].x, pair[1].x) = (600.0, 650.0);
+                pair[1].facing = Facing::Right;
+                pair[1].set_anim(slow);
+                avoid_collisions(&mut pair, &world);
+                if pair[0].anim != AnimId::Jump {
+                    continue;
+                }
+                leaps += 1;
+                while pair[0].anim == AnimId::Jump {
+                    for s in pair.iter_mut() {
+                        s.tick(16, &SEGS, &world);
+                    }
+                }
+                let lead = pair[0].x - pair[1].x;
+                assert!(
+                    lead >= TILE_W as f32,
+                    "seed {seed} {slow:?}: nur {lead} px vor dem anderen gelandet"
+                );
+            }
+        }
+        assert!(leaps > 0);
+    }
+
+    #[test]
+    fn thrown_sheep_flies_in_an_arc() {
+        let none: Vec<Vec<Surface>> = vec![vec![]];
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &none,
+        };
+        let mut s = on_floor(15);
+        s.facing = Facing::Left;
+        s.start_drag();
+        s.set_pos(0, 400.0, 500.0);
+        s.end_drag(800.0, -400.0);
+        assert_eq!(s.facing, Facing::Right);
+        // Steigt erst noch, dann geht es im Bogen nach unten.
+        s.tick(16, &SEGS, &world);
+        assert!(s.y < 500.0 && s.x > 400.0);
+        let mut last_x = s.x;
+        tick_until_landed(&mut s, &world, 16);
+        assert!(s.x > last_x + 200.0, "nur bis x={}", s.x);
+        last_x = s.x;
+        assert_eq!(s.y + TILE_H as f32, 1080.0);
+        assert!(last_x < 1920.0 - TILE_W as f32);
+    }
+
+    #[test]
+    fn thrown_against_the_wall_bounces_back() {
+        let none: Vec<Vec<Surface>> = vec![vec![]];
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &none,
+        };
+        let mut s = on_floor(16);
+        s.start_drag();
+        s.set_pos(0, 100.0, 300.0);
+        s.end_drag(-1500.0, 0.0);
+        let mut min_x = f32::MAX;
+        while s.falling || s.anim == AnimId::Fall {
+            s.tick(16, &SEGS, &world);
+            min_x = min_x.min(s.x);
+        }
+        assert_eq!(min_x, 0.0);
+        assert!(s.x > 0.0);
+        assert_eq!(s.facing, Facing::Right);
+    }
+
+    #[test]
+    fn released_without_motion_drops_straight_down() {
+        let none: Vec<Vec<Surface>> = vec![vec![]];
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &none,
+        };
+        let mut s = on_floor(17);
+        s.start_drag();
+        s.set_pos(0, 700.0, 300.0);
+        s.end_drag(0.0, 0.0);
+        tick_until_landed(&mut s, &world, 16);
+        assert_eq!(s.x, 700.0);
+    }
+
+    #[test]
     fn no_leap_without_room_to_land() {
         let none: Vec<Vec<Surface>> = vec![vec![]];
         let world = World {
@@ -1810,5 +2168,122 @@ mod tests {
             s.tick(16, &SEGS, &world);
             assert_ne!(s.anim, AnimId::Alarm);
         }
+    }
+
+    /// Tickt, solange `still` gilt (max. 20 s Simulationszeit).
+    fn tick_while(s: &mut Sheep, world: &World, mut still: impl FnMut(&Sheep) -> bool) {
+        for _ in 0..(20_000 / 16) {
+            if !still(s) {
+                return;
+            }
+            s.tick(16, &SEGS, world);
+        }
+        panic!("hängt in {:?}", s.anim);
+    }
+
+    #[test]
+    fn ufo_beams_sheep_up_and_it_comes_back() {
+        let none: Vec<Vec<Surface>> = vec![vec![]];
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &none,
+        };
+        let floor = 1080.0 - TILE_H as f32;
+        let mut s = Sheep::new_at(0, 800.0, 41);
+        s.set_entry(Entry::Ufo);
+        s.tick(16, &SEGS, &world);
+        assert_eq!(s.anim, AnimId::UfoArrive);
+        assert_eq!(s.y, floor);
+        let ufo = *s.prop().expect("UFO fehlt");
+        assert!(ufo.in_front());
+        assert!(ufo.y < 0.0);
+
+        tick_while(&mut s, &world, |s| s.anim == AnimId::UfoArrive);
+        assert_eq!(s.anim, AnimId::UfoSpotted);
+        let ufo = *s.prop().unwrap();
+        assert_eq!(ufo.x, s.x);
+        assert!((ufo.y - (floor - UFO_HOVER_PX)).abs() <= UFO_BOB_PX + 0.01);
+        let beam = s.beam().expect("kein Strahl");
+        assert_eq!(beam.bottom, 1080.0);
+        assert!(beam.top > ufo.y && beam.top < s.y);
+
+        tick_while(&mut s, &world, |s| s.anim != AnimId::UfoBeam);
+        let start_y = s.y;
+        tick_while(&mut s, &world, |s| s.anim == AnimId::UfoBeam);
+        // Steigt nur, bis es im UFO verschwunden ist.
+        assert!(s.y < start_y);
+        assert_eq!(s.anim, AnimId::UfoGone);
+        assert_eq!(s.alpha(), 0.0);
+        assert!(s.beam().is_none());
+        assert!(!s.contains(s.x + 20.0, s.y + 20.0));
+
+        // UFO fliegt davon, dann tritt das Schaf neu auf.
+        let mut flew_off = false;
+        tick_while(&mut s, &world, |s| {
+            s.anim == AnimId::UfoGone && s.prop().inspect(|p| flew_off |= p.y < 0.0).is_some()
+        });
+        assert!(flew_off, "UFO ist nicht weggeflogen");
+        s.tick(16, &SEGS, &world);
+        assert_ne!(s.anim, AnimId::UfoGone);
+        assert!(s.prop().is_none_or(|p| !p.in_front()));
+        assert_eq!(s.alpha(), 1.0);
+    }
+
+    #[test]
+    fn entry_waits_until_all_overlays_have_dims() {
+        let none: Vec<Vec<Surface>> = vec![vec![], vec![]];
+        let half = [(1920, 1080), (0, 0)];
+        let mut s = Sheep::new_at(0, 800.0, 44);
+        s.set_entry(Entry::Ufo);
+        let early = World {
+            area_dims: &half,
+            surfaces: &none,
+        };
+        s.tick(16, &SEGS, &early);
+        assert_ne!(s.anim, AnimId::UfoArrive);
+        let both = [(1920, 1080), (1920, 1080)];
+        let ready = World {
+            area_dims: &both,
+            surfaces: &none,
+        };
+        s.tick(16, &SEGS, &ready);
+        assert_eq!(s.anim, AnimId::UfoArrive);
+    }
+
+    #[test]
+    fn sheep_pulled_out_of_beam_stays_and_ufo_leaves() {
+        let none: Vec<Vec<Surface>> = vec![vec![]];
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &none,
+        };
+        let mut s = Sheep::new_at(0, 800.0, 42);
+        s.set_entry(Entry::Ufo);
+        s.tick(16, &SEGS, &world);
+        tick_while(&mut s, &world, |s| s.anim != AnimId::UfoBeam);
+        for _ in 0..30 {
+            s.tick(16, &SEGS, &world);
+        }
+        s.start_drag();
+        assert!(s.beam().is_none());
+        assert!(s.prop().is_some_and(Prop::in_front));
+        s.end_drag(0.0, 0.0);
+        tick_until_landed(&mut s, &world, 16);
+        assert_eq!(s.alpha(), 1.0);
+        tick_while(&mut s, &world, |s| s.prop().is_some());
+    }
+
+    #[test]
+    fn no_ufo_right_below_the_top_edge() {
+        let surfaces = vec![vec![surface(1, 100, 900, 150)]];
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &surfaces,
+        };
+        let mut s = Sheep::new_at(0, 400.0, 43);
+        tick_until_landed(&mut s, &world, 16);
+        s.set_anim(AnimId::UfoArrive);
+        assert_eq!(s.anim, AnimId::Walk);
+        assert!(s.prop().is_none());
     }
 }

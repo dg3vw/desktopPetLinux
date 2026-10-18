@@ -178,6 +178,15 @@ pub enum AnimId {
     /// Frei komponiert: Timer abgelaufen – auf der Stelle hüpfen und sich
     /// bei jedem Hüpfer umdrehen, bis der Alarm quittiert wird.
     Alarm,
+    /// Frei komponiert: ein UFO (Kacheln 158–165, im Original ungenutzt)
+    /// schwebt heran, das Schaf grast ahnungslos weiter.
+    UfoArrive,
+    /// UFO schaltet den Strahl ein, das Schaf glotzt erschrocken.
+    UfoSpotted,
+    /// Das Schaf zappelt im Strahl nach oben ins UFO.
+    UfoBeam,
+    /// Entführt: unsichtbar, bis das UFO davongeflogen ist.
+    UfoGone,
 }
 
 pub struct AnimDef {
@@ -202,13 +211,14 @@ pub const WALK: AnimDef = AnimDef {
     dx_per_tick: 2,
     repeat: 6,
     next: &[
-        (62, AnimId::Walk),
+        (61, AnimId::Walk),
         (7, AnimId::YawnSleep),
         (5, AnimId::Sleep2Yawn),
         (5, AnimId::Sleep3Yawn),
         (6, AnimId::Eat),
         (10, AnimId::RunBegin),
         (5, AnimId::Rotate1A),
+        (1, AnimId::UfoArrive),
     ],
     flip_on_end: false,
 };
@@ -718,6 +728,49 @@ pub const ALARM: AnimDef = AnimDef {
     flip_on_end: true,
 };
 
+/// UfoArrive (frei komponiert): grasen wie bei Eat, während das UFO
+/// heranschwebt. Die Dauer der Sequenz ist die Anflugzeit.
+pub const UFO_ARRIVE: AnimDef = AnimDef {
+    frames: &[6, 6, 58, 59, 59, 60, 61, 60, 61, 60, 61, 6],
+    interval_ms: 250,
+    dx_per_tick: 0,
+    repeat: 1,
+    next: &[(100, AnimId::UfoSpotted)],
+    flip_on_end: false,
+};
+
+/// UfoSpotted (frei komponiert): im Lichtkegel stehen und glotzen
+/// (Glubschauge wie bei Surprised).
+pub const UFO_SPOTTED: AnimDef = AnimDef {
+    frames: &[6, 50, 51, 51, 51, 51, 51, 51, 51, 51],
+    interval_ms: 120,
+    dx_per_tick: 0,
+    repeat: 1,
+    next: &[(100, AnimId::UfoBeam)],
+    flip_on_end: false,
+};
+
+/// UfoBeam: Zappel-Frames aus Drag (id=4). Endet nicht über `next`,
+/// sondern sobald das Schaf im UFO verschwunden ist (siehe Sheep).
+pub const UFO_BEAM: AnimDef = AnimDef {
+    frames: &[42, 43, 43, 42, 44, 44],
+    interval_ms: 100,
+    dx_per_tick: 0,
+    repeat: 1,
+    next: &[(100, AnimId::UfoBeam)],
+    flip_on_end: false,
+};
+
+/// UfoGone: unsichtbar; endet, sobald das UFO weg ist (siehe Sheep).
+pub const UFO_GONE: AnimDef = AnimDef {
+    frames: &[6],
+    interval_ms: 500,
+    dx_per_tick: 0,
+    repeat: 1,
+    next: &[(100, AnimId::UfoGone)],
+    flip_on_end: false,
+};
+
 pub fn def(id: AnimId) -> &'static AnimDef {
     match id {
         AnimId::Walk => &WALK,
@@ -768,6 +821,10 @@ pub fn def(id: AnimId) -> &'static AnimDef {
         AnimId::VisitWalk => &VISIT_WALK,
         AnimId::VisitBlush => &VISIT_BLUSH,
         AnimId::Alarm => &ALARM,
+        AnimId::UfoArrive => &UFO_ARRIVE,
+        AnimId::UfoSpotted => &UFO_SPOTTED,
+        AnimId::UfoBeam => &UFO_BEAM,
+        AnimId::UfoGone => &UFO_GONE,
     }
 }
 

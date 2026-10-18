@@ -132,7 +132,7 @@ fn run_overlay(settings: Settings) {
         Sheep::new_at(monitor_idx, x, seed)
     };
 
-    // Zum Ausprobieren der seltenen Auftritte: DESKTOP_SHEEP_ENTRY=bath|visit|sky
+    // Zum Ausprobieren der seltenen Auftritte: DESKTOP_SHEEP_ENTRY=bath|visit|ufo|sky
     // lässt jedes Schaf beim Start so ins Bild kommen.
     let debug_entry = std::env::var("DESKTOP_SHEEP_ENTRY")
         .ok()

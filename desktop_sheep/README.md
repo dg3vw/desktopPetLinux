@@ -23,13 +23,19 @@ unterstützt.
   läuft gelegentlich seitlich aus dem Bild und kommt wieder – meist von oben,
   manchmal als brennender Meteor, der in einer Badewanne landet, oder es
   trifft in der Bildmitte ein schwarzes Schaf und errötet
+- Ab und zu schwebt ein UFO heran, während das Schaf grast, und beamt es
+  im Lichtkegel nach oben; das UFO fliegt davon, und kurz darauf kommt das
+  Schaf wieder ins Bild. Wer das Schaf rechtzeitig aus dem Strahl zieht,
+  rettet es – dann fliegt das UFO ohne Beute ab
 - Grasen, Gähnen/Schlafen, Sitzen/Dösen, von vorn sitzend schlafen –
   Mausbewegung weckt schlafende Schafe
 - Schaf mit der Maus packen und wegziehen, auch über Monitorgrenzen; beim
-  Loslassen fällt es mit Schwerkraft und federt nach – auf den Boden oder
-  auf ein Fenster darunter
+  Loslassen fliegt es mit dem Schwung der Mausbewegung im Bogen weiter,
+  prallt vom Bildschirmrand ab, fällt mit Schwerkraft und federt nach – auf
+  den Boden oder auf ein Fenster darunter
 - Mehrere Schafe gleichzeitig (`--sheep N`); sie laufen nicht durcheinander
-  hindurch, sondern springen übereinander hinweg oder drehen um
+  hindurch, sondern springen übereinander hinweg (weit genug, auch wenn
+  das vordere davonläuft) oder drehen um
 - Farbvarianten (`--color`), auch zufällig je Schaf (`--color random`)
 - Eieruhr im Tray-Menü (1 bis 60 Minuten): Die Schafe laufen normal weiter;
   zeigt die Maus auf ein Schaf, nennt es in einer Sprechblase die Restzeit.
@@ -91,7 +97,8 @@ erkannten Fenster und begehbaren Kanten auf stderr aus.
 
 Die seltenen Auftritte lassen sich direkt beim Start erzwingen:
 `DESKTOP_SHEEP_ENTRY=bath` (Meteor in die Badewanne) bzw.
-`DESKTOP_SHEEP_ENTRY=visit` (schwarzes Schaf).
+`DESKTOP_SHEEP_ENTRY=visit` (schwarzes Schaf) bzw.
+`DESKTOP_SHEEP_ENTRY=ufo` (UFO-Entführung).
 `DESKTOP_SHEEP_TIMER=<sekunden>` startet gleich beim Start einen Timer.
 
 ## Tests
@@ -128,6 +135,7 @@ src/
     world.rs         Tick-Kontext (Overlay-Maße + Kanten)
     anim.rs          Animations-Tabelle (aus animations.xml abgeleitet), RNG
     bubble.rs        Lage einer Sprechblase über/unter dem Sprite
+    fling.rs         Wurfgeschwindigkeit beim Loslassen aus der Mausbewegung
     sheep.rs         Zustandsmaschine, Bewegung, Fall-Physik, Fenster-Halt
   platform/
     mod.rs           Platform-Trait
