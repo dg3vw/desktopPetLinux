@@ -17,6 +17,8 @@ pub type WindowId = u64;
 pub struct WindowRect {
     pub id: WindowId,
     pub rect: Rect,
+    /// Fenster ist im Vollbildmodus (`_NET_WM_STATE_FULLSCREEN`).
+    pub fullscreen: bool,
 }
 
 /// Ein begehbares Stück Fensteroberkante in Overlay-lokalen Koordinaten.
@@ -105,6 +107,32 @@ pub fn walkable_surfaces(windows: &[WindowRect], overlays: &[Rect]) -> Vec<Vec<S
     out
 }
 
+/// Welche Overlays liegen über einem sichtbaren Vollbild-Fenster?
+///
+/// Von oben nach unten im Stapel: Zählt das erste Fenster, das entweder im
+/// Vollbild über der Overlay-Mitte liegt (dann `true`) oder das Overlay komplett
+/// abdeckt (dann `false` – ein darunterliegendes Vollbild ist nicht zu sehen).
+/// Kleinere Fenster über dem Vollbild, etwa Dialoge, ändern nichts.
+pub fn fullscreen_overlays(windows: &[WindowRect], overlays: &[Rect]) -> Vec<bool> {
+    overlays
+        .iter()
+        .map(|o| {
+            let (cx, cy) = (o.x + o.width / 2, o.y + o.height / 2);
+            for w in windows.iter().rev() {
+                let r = &w.rect;
+                let over_center = r.x <= cx && cx < r.right() && r.y <= cy && cy < r.bottom();
+                if w.fullscreen && over_center {
+                    return true;
+                }
+                if r.x <= o.x && r.y <= o.y && r.right() >= o.right() && r.bottom() >= o.bottom() {
+                    return false;
+                }
+            }
+            false
+        })
+        .collect()
+}
+
 /// Zieht das halboffene Intervall `cut` von allen `spans` ab.
 fn subtract(spans: &[(i32, i32)], cut: (i32, i32)) -> Vec<(i32, i32)> {
     let (c0, c1) = cut;
@@ -137,6 +165,14 @@ mod tests {
                 width: w,
                 height: h,
             },
+            fullscreen: false,
+        }
+    }
+
+    fn full(id: WindowId, x: i32, y: i32, w: i32, h: i32) -> WindowRect {
+        WindowRect {
+            fullscreen: true,
+            ..win(id, x, y, w, h)
         }
     }
 
@@ -146,6 +182,66 @@ mod tests {
         width: 1920,
         height: 1080,
     };
+
+    /// Zwei Monitore; links nimmt ein Panel dem Overlay 40 px weg.
+    const PANEL_MON: Rect = Rect {
+        x: 40,
+        y: 0,
+        width: 1880,
+        height: 1200,
+    };
+    const RIGHT_MON: Rect = Rect {
+        x: 1920,
+        y: 0,
+        width: 1920,
+        height: 1200,
+    };
+
+    #[test]
+    fn fullscreen_marks_only_its_own_monitor() {
+        let w = [
+            win(1, 40, 0, 1880, 1200),
+            win(2, 2311, 283, 1342, 801),
+            full(3, 0, 0, 1920, 1200),
+        ];
+        assert_eq!(
+            fullscreen_overlays(&w, &[PANEL_MON, RIGHT_MON]),
+            vec![true, false]
+        );
+    }
+
+    #[test]
+    fn maximized_window_is_not_fullscreen() {
+        let w = [win(1, 1920, 0, 1920, 1200)];
+        assert_eq!(fullscreen_overlays(&w, &[RIGHT_MON]), vec![false]);
+    }
+
+    #[test]
+    fn small_window_above_fullscreen_changes_nothing() {
+        let w = [full(1, 0, 0, 1920, 1200), win(2, 800, 500, 300, 200)];
+        assert_eq!(fullscreen_overlays(&w, &[PANEL_MON]), vec![true]);
+    }
+
+    #[test]
+    fn covering_window_above_fullscreen_ends_it() {
+        let w = [full(1, 0, 0, 1920, 1200), win(2, 40, 0, 1880, 1200)];
+        assert_eq!(fullscreen_overlays(&w, &[PANEL_MON]), vec![false]);
+    }
+
+    #[test]
+    fn fullscreen_above_maximized_counts() {
+        let w = [win(2, 40, 0, 1880, 1200), full(1, 0, 0, 1920, 1200)];
+        assert_eq!(fullscreen_overlays(&w, &[PANEL_MON]), vec![true]);
+    }
+
+    #[test]
+    fn fullscreen_across_both_monitors_marks_both() {
+        let w = [full(1, 0, 0, 3840, 1200)];
+        assert_eq!(
+            fullscreen_overlays(&w, &[PANEL_MON, RIGHT_MON]),
+            vec![true, true]
+        );
+    }
 
     #[test]
     fn single_window_gives_full_edge() {

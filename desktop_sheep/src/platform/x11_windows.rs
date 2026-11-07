@@ -26,6 +26,7 @@ pub struct Atoms {
     type_dock: xlib::Atom,
     wm_state: xlib::Atom,
     state_hidden: xlib::Atom,
+    state_fullscreen: xlib::Atom,
     frame_extents: xlib::Atom,
     gtk_frame_extents: xlib::Atom,
 }
@@ -46,6 +47,7 @@ impl Atoms {
             type_dock: intern("_NET_WM_WINDOW_TYPE_DOCK"),
             wm_state: intern("_NET_WM_STATE"),
             state_hidden: intern("_NET_WM_STATE_HIDDEN"),
+            state_fullscreen: intern("_NET_WM_STATE_FULLSCREEN"),
             frame_extents: intern("_NET_FRAME_EXTENTS"),
             gtk_frame_extents: intern("_GTK_FRAME_EXTENTS"),
         }
@@ -153,11 +155,11 @@ pub unsafe fn list_windows(d: *mut xlib::Display, a: &Atoms) -> Vec<WindowRect> 
                 continue;
             }
         }
-        if let Some(states) = get_u32_list(d, w, a.wm_state) {
-            if states.contains(&a.state_hidden) {
-                continue;
-            }
+        let states = get_u32_list(d, w, a.wm_state).unwrap_or_default();
+        if states.contains(&a.state_hidden) {
+            continue;
         }
+        let fullscreen = states.contains(&a.state_fullscreen);
 
         let mut attrs: xlib::XWindowAttributes = std::mem::zeroed();
         if xlib::XGetWindowAttributes(d, w, &mut attrs) == 0 {
@@ -183,7 +185,11 @@ pub unsafe fn list_windows(d: *mut xlib::Display, a: &Atoms) -> Vec<WindowRect> 
         if rect.width <= 0 || rect.height <= 0 {
             continue;
         }
-        out.push(WindowRect { id, rect });
+        out.push(WindowRect {
+            id,
+            rect,
+            fullscreen,
+        });
     }
     out
 }

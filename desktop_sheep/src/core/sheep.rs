@@ -462,10 +462,19 @@ impl Sheep {
         if let Some(entry) = self.pending_entry {
             // Der Auftritt wählt einen zufälligen Monitor – erst starten,
             // wenn alle Overlays ihre Maße kennen.
-            if !world.area_dims.is_empty() && world.area_dims.iter().all(|&(_, h)| h > 0) {
+            if world.overlays_ready() {
                 self.pending_entry = None;
                 self.start_entry(entry, world);
             }
+        }
+        // Vollbild auf diesem Monitor: von oben auf einem freien Monitor neu
+        // auftreten. Gibt es keinen, bleibt das Schaf verdeckt hier.
+        if !self.dragged
+            && world.is_fullscreen(self.monitor_idx)
+            && world.overlays_ready()
+            && !world.free_monitors().is_empty()
+        {
+            self.start_entry(Entry::Sky, world);
         }
         self.tick_inner(dt_ms, segments, world);
         self.update_prop(dt_ms);
@@ -614,11 +623,17 @@ impl Sheep {
         4.0 * height * p * (1.0 - p)
     }
 
-    /// Startet einen Auftritt auf einem zufälligen Monitor. Bad und Besuch
-    /// fallen auf `Sky` zurück, wenn der Monitor zu klein dafür ist.
+    /// Startet einen Auftritt auf einem zufälligen Monitor, bevorzugt einem
+    /// ohne Vollbild-Fenster. Bad und Besuch fallen auf `Sky` zurück, wenn der
+    /// Monitor zu klein dafür ist.
     fn start_entry(&mut self, entry: Entry, world: &World) {
-        let n = world.area_dims.len().max(1) as u32;
-        let idx = self.rng.range(n) as usize;
+        let free = world.free_monitors();
+        let idx = if free.is_empty() {
+            let n = world.area_dims.len().max(1) as u32;
+            self.rng.range(n) as usize
+        } else {
+            free[self.rng.range(free.len() as u32) as usize]
+        };
         let (aw, ah) = world.dims(idx);
         let floor = (ah - TILE_H as i32).max(0) as f32;
         let from_right = self.rng.range(2) == 0;
@@ -1345,8 +1360,9 @@ impl Sheep {
     }
 
     /// Versucht, in Bewegungsrichtung auf den Nachbarmonitor zu wechseln.
-    /// Voraussetzung: das Nachbarsegment schließt in X nahtlos an und hat
-    /// (annähernd) dieselbe Bodenhöhe. Rückgabe: true wenn gewechselt.
+    /// Voraussetzung: das Nachbarsegment schließt in X nahtlos an, hat
+    /// (annähernd) dieselbe Bodenhöhe und der Nachbarmonitor zeigt kein
+    /// Vollbild-Fenster. Rückgabe: true wenn gewechselt.
     fn try_cross(&mut self, segments: &[GroundSegment], world: &World, dir: Facing) -> bool {
         const KANTE_TOLERANZ: i32 = 8;
         let cur = match segments.get(self.monitor_idx) {
@@ -1359,6 +1375,9 @@ impl Sheep {
                 let Some(next) = segments.get(next_idx) else {
                     return false;
                 };
+                if world.is_fullscreen(next_idx) {
+                    return false;
+                }
                 if (next.x_start - cur.x_end).abs() > KANTE_TOLERANZ {
                     return false;
                 }
@@ -1375,6 +1394,9 @@ impl Sheep {
                     return false;
                 }
                 let prev_idx = self.monitor_idx - 1;
+                if world.is_fullscreen(prev_idx) {
+                    return false;
+                }
                 let prev = segments[prev_idx];
                 if (cur.x_start - prev.x_end).abs() > KANTE_TOLERANZ {
                     return false;
@@ -1463,6 +1485,7 @@ mod tests {
         let world = World {
             area_dims: &DIMS,
             surfaces: &surfaces,
+            fullscreen: &[],
         };
         let mut s = Sheep::new_at(0, 400.0, 42);
         tick_until_landed(&mut s, &world, 16);
@@ -1477,6 +1500,7 @@ mod tests {
         let world = World {
             area_dims: &DIMS,
             surfaces: &surfaces,
+            fullscreen: &[],
         };
         let mut s = Sheep::new_at(0, 400.0, 7);
         tick_until_landed(&mut s, &world, 100);
@@ -1489,6 +1513,7 @@ mod tests {
         let world = World {
             area_dims: &DIMS,
             surfaces: &surfaces,
+            fullscreen: &[],
         };
         let mut s = Sheep::new_at(0, 600.0, 1);
         tick_until_landed(&mut s, &world, 16);
@@ -1502,6 +1527,7 @@ mod tests {
         let world = World {
             area_dims: &DIMS,
             surfaces: &surfaces,
+            fullscreen: &[],
         };
         let mut s = Sheep::new_at(0, 400.0, 3);
         tick_until_landed(&mut s, &world, 16);
@@ -1522,6 +1548,7 @@ mod tests {
             &World {
                 area_dims: &DIMS,
                 surfaces: &moved,
+                fullscreen: &[],
             },
         );
         assert_eq!(s.x, x0);
@@ -1538,6 +1565,7 @@ mod tests {
             &World {
                 area_dims: &DIMS,
                 surfaces: &up,
+                fullscreen: &[],
             },
         );
         assert_eq!(s.y + TILE_H as f32, 250.0);
@@ -1553,6 +1581,7 @@ mod tests {
         let world = World {
             area_dims: &DIMS,
             surfaces: &away,
+            fullscreen: &[],
         };
         s.tick(16, &SEGS, &world);
         assert_eq!(s.anim, AnimId::Surprised);
@@ -1577,6 +1606,7 @@ mod tests {
         let world = World {
             area_dims: &DIMS,
             surfaces: &down,
+            fullscreen: &[],
         };
         s.tick(16, &SEGS, &world);
         assert_eq!(s.anim, AnimId::Surprised);
@@ -1592,6 +1622,7 @@ mod tests {
         let world = World {
             area_dims: &DIMS,
             surfaces: &empty,
+            fullscreen: &[],
         };
         s.tick(16, &SEGS, &world);
         assert_eq!(s.anim, AnimId::Surprised);
@@ -1605,6 +1636,7 @@ mod tests {
         let world = World {
             area_dims: &DIMS,
             surfaces: &none,
+            fullscreen: &[],
         };
         let mut s = Sheep::new_at(0, 0.0, seed);
         tick_until_landed(&mut s, &world, 16);
@@ -1619,6 +1651,7 @@ mod tests {
         let world = World {
             area_dims: &DIMS,
             surfaces: &none,
+            fullscreen: &[],
         };
         // Seeds durchprobieren, bis eins die ganze Decke schafft (ohne
         // vorher loszulassen) – deterministisch, da fester RNG.
@@ -1660,6 +1693,7 @@ mod tests {
         let world = World {
             area_dims: &DIMS,
             surfaces: &surfaces,
+            fullscreen: &[],
         };
         for seed in 1..200 {
             let mut s = at_left_wall_climbing(seed);
@@ -1684,6 +1718,7 @@ mod tests {
         let world = World {
             area_dims: &DIMS,
             surfaces: &none,
+            fullscreen: &[],
         };
         let mut s = Sheep::new_at(0, 800.0, seed);
         tick_until_landed(&mut s, &world, 16);
@@ -1696,6 +1731,7 @@ mod tests {
         let world = World {
             area_dims: &DIMS,
             surfaces: &none,
+            fullscreen: &[],
         };
         let mut s = on_floor(11);
         s.facing = Facing::Right;
@@ -1730,6 +1766,7 @@ mod tests {
         let world = World {
             area_dims: &DIMS,
             surfaces: &none,
+            fullscreen: &[],
         };
         let (mut leaps, mut turns) = (0, 0);
         for seed in 0..40 {
@@ -1767,6 +1804,7 @@ mod tests {
         let world = World {
             area_dims: &DIMS,
             surfaces: &none,
+            fullscreen: &[],
         };
         let floor = 1080.0 - TILE_H as f32;
         // Am Boden laufen und nicht gerade springen/auftreten.
@@ -1807,6 +1845,7 @@ mod tests {
         let world = World {
             area_dims: &DIMS,
             surfaces: &none,
+            fullscreen: &[],
         };
         let mut leaps = 0;
         for seed in 0..40 {
@@ -1842,6 +1881,7 @@ mod tests {
         let world = World {
             area_dims: &DIMS,
             surfaces: &none,
+            fullscreen: &[],
         };
         let mut s = on_floor(15);
         s.facing = Facing::Left;
@@ -1866,6 +1906,7 @@ mod tests {
         let world = World {
             area_dims: &DIMS,
             surfaces: &none,
+            fullscreen: &[],
         };
         let mut s = on_floor(16);
         s.start_drag();
@@ -1887,6 +1928,7 @@ mod tests {
         let world = World {
             area_dims: &DIMS,
             surfaces: &none,
+            fullscreen: &[],
         };
         let mut s = on_floor(17);
         s.start_drag();
@@ -1902,6 +1944,7 @@ mod tests {
         let world = World {
             area_dims: &DIMS,
             surfaces: &none,
+            fullscreen: &[],
         };
         for seed in 0..40 {
             // Kurz vor der rechten Wand: hinter dem anderen Schaf ist kein Platz.
@@ -1920,6 +1963,7 @@ mod tests {
         let world = World {
             area_dims: &DIMS,
             surfaces: &none,
+            fullscreen: &[],
         };
         let floor = 1080.0 - TILE_H as f32;
         let mut meteors = 0;
@@ -1946,6 +1990,7 @@ mod tests {
         let world = World {
             area_dims: &DIMS,
             surfaces: &none,
+            fullscreen: &[],
         };
         let mut s = on_floor(12);
         s.set_anim(AnimId::Sleep3Yawn);
@@ -1963,6 +2008,7 @@ mod tests {
         let world = World {
             area_dims: &DIMS,
             surfaces: &none,
+            fullscreen: &[],
         };
         let mut s = Sheep::new_at(0, 800.0, 21);
         s.set_entry(Entry::Bath);
@@ -1992,6 +2038,7 @@ mod tests {
         let world = World {
             area_dims: &DIMS,
             surfaces: &none,
+            fullscreen: &[],
         };
         for seed in [31, 32] {
             let mut s = Sheep::new_at(0, 800.0, seed);
@@ -2034,6 +2081,7 @@ mod tests {
         let world = World {
             area_dims: &DIMS,
             surfaces: &surfaces,
+            fullscreen: &[],
         };
         let mut s = Sheep::new_at(0, 380.0, 5);
         tick_until_landed(&mut s, &world, 16);
@@ -2055,6 +2103,7 @@ mod tests {
         let world = World {
             area_dims: &DIMS,
             surfaces: &surfaces,
+            fullscreen: &[],
         };
         let mut s = Sheep::new_at(0, 380.0, 99);
         tick_until_landed(&mut s, &world, 16);
@@ -2076,6 +2125,7 @@ mod tests {
         let world = World {
             area_dims: &DIMS,
             surfaces: &surfaces,
+            fullscreen: &[],
         };
         let mut s = Sheep::new_at(0, 400.0, 11);
         tick_until_landed(&mut s, &world, 16);
@@ -2100,6 +2150,7 @@ mod tests {
         let world = World {
             area_dims: &DIMS,
             surfaces: &surfaces,
+            fullscreen: &[],
         };
         let mut s = Sheep::new_at(0, 400.0, 12);
         s.set_alarm(true);
@@ -2122,6 +2173,7 @@ mod tests {
         let world = World {
             area_dims: &DIMS,
             surfaces: &surfaces,
+            fullscreen: &[],
         };
         let mut s = Sheep::new_at(0, 400.0, 13);
         tick_until_landed(&mut s, &world, 16);
@@ -2138,6 +2190,7 @@ mod tests {
         let world = World {
             area_dims: &DIMS,
             surfaces: &surfaces,
+            fullscreen: &[],
         };
         s.set_alarm(true);
         for _ in 0..300 {
@@ -2154,6 +2207,7 @@ mod tests {
         let world = World {
             area_dims: &DIMS,
             surfaces: &surfaces,
+            fullscreen: &[],
         };
         let mut s = Sheep::new_at(0, 400.0, 14);
         tick_until_landed(&mut s, &world, 16);
@@ -2168,6 +2222,106 @@ mod tests {
             s.tick(16, &SEGS, &world);
             assert_ne!(s.anim, AnimId::Alarm);
         }
+    }
+
+    const DIMS2: [(i32, i32); 2] = [(1880, 1200), (1920, 1200)];
+    const SEGS2: [GroundSegment; 2] = [
+        GroundSegment {
+            x_start: 0,
+            x_end: 1920,
+            y: 1200,
+        },
+        GroundSegment {
+            x_start: 1920,
+            x_end: 3840,
+            y: 1200,
+        },
+    ];
+
+    #[test]
+    fn sheep_leaves_fullscreen_monitor_for_free_one() {
+        let none: Vec<Vec<Surface>> = vec![Vec::new(); 2];
+        let world = World {
+            area_dims: &DIMS2,
+            surfaces: &none,
+            fullscreen: &[true, false],
+        };
+        for seed in 0..20 {
+            let mut s = Sheep::new_at(0, 500.0, seed);
+            s.tick(16, &SEGS2, &world);
+            assert_eq!(s.monitor_idx, 1);
+        }
+    }
+
+    #[test]
+    fn sheep_never_returns_to_fullscreen_monitor() {
+        let none: Vec<Vec<Surface>> = vec![Vec::new(); 2];
+        let world = World {
+            area_dims: &DIMS2,
+            surfaces: &none,
+            fullscreen: &[true, false],
+        };
+        for seed in 0..10 {
+            let mut s = Sheep::new_at(1, 30.0, seed);
+            s.facing = Facing::Left;
+            for _ in 0..(120_000 / 16) {
+                s.tick(16, &SEGS2, &world);
+                assert_eq!(s.monitor_idx, 1, "Seed {seed}");
+            }
+        }
+    }
+
+    #[test]
+    fn sheep_crosses_monitors_without_fullscreen() {
+        let none: Vec<Vec<Surface>> = vec![Vec::new(); 2];
+        let world = World {
+            area_dims: &DIMS2,
+            surfaces: &none,
+            fullscreen: &[false, false],
+        };
+        let crossed = (0..10).any(|seed| {
+            let mut s = Sheep::new_at(1, 30.0, seed);
+            s.facing = Facing::Left;
+            (0..(120_000 / 16)).any(|_| {
+                s.tick(16, &SEGS2, &world);
+                s.monitor_idx == 0
+            })
+        });
+        assert!(crossed);
+    }
+
+    #[test]
+    fn sheep_stays_hidden_without_free_monitor() {
+        let none: Vec<Vec<Surface>> = vec![Vec::new(); 2];
+        let world = World {
+            area_dims: &DIMS2,
+            surfaces: &none,
+            fullscreen: &[true, true],
+        };
+        let mut s = Sheep::new_at(0, 500.0, 7);
+        for _ in 0..500 {
+            s.tick(16, &SEGS2, &world);
+        }
+        assert!(s.y < 1200.0);
+        assert!(s.monitor_idx < 2);
+    }
+
+    #[test]
+    fn dragged_sheep_moves_away_only_after_release() {
+        let none: Vec<Vec<Surface>> = vec![Vec::new(); 2];
+        let world = World {
+            area_dims: &DIMS2,
+            surfaces: &none,
+            fullscreen: &[true, false],
+        };
+        let mut s = Sheep::new_at(1, 500.0, 3);
+        s.start_drag();
+        s.set_pos(0, 500.0, 300.0);
+        s.tick(16, &SEGS2, &world);
+        assert_eq!(s.monitor_idx, 0);
+        s.end_drag(0.0, 0.0);
+        s.tick(16, &SEGS2, &world);
+        assert_eq!(s.monitor_idx, 1);
     }
 
     /// Tickt, solange `still` gilt (max. 20 s Simulationszeit).
@@ -2187,6 +2341,7 @@ mod tests {
         let world = World {
             area_dims: &DIMS,
             surfaces: &none,
+            fullscreen: &[],
         };
         let floor = 1080.0 - TILE_H as f32;
         let mut s = Sheep::new_at(0, 800.0, 41);
@@ -2238,6 +2393,7 @@ mod tests {
         let early = World {
             area_dims: &half,
             surfaces: &none,
+            fullscreen: &[],
         };
         s.tick(16, &SEGS, &early);
         assert_ne!(s.anim, AnimId::UfoArrive);
@@ -2245,6 +2401,7 @@ mod tests {
         let ready = World {
             area_dims: &both,
             surfaces: &none,
+            fullscreen: &[],
         };
         s.tick(16, &SEGS, &ready);
         assert_eq!(s.anim, AnimId::UfoArrive);
@@ -2256,6 +2413,7 @@ mod tests {
         let world = World {
             area_dims: &DIMS,
             surfaces: &none,
+            fullscreen: &[],
         };
         let mut s = Sheep::new_at(0, 800.0, 42);
         s.set_entry(Entry::Ufo);
@@ -2279,6 +2437,7 @@ mod tests {
         let world = World {
             area_dims: &DIMS,
             surfaces: &surfaces,
+            fullscreen: &[],
         };
         let mut s = Sheep::new_at(0, 400.0, 43);
         tick_until_landed(&mut s, &world, 16);

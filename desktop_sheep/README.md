@@ -15,6 +15,11 @@ unterstützt.
   (oder schließt, minimiert, verdeckt es), hängt es kurz verdutzt in der
   Luft und fällt dann auf das nächste Fenster oder den Boden; an der
   Fensterkante springt es herunter oder rutscht ab
+- Stört nicht bei Spielen und Videos: Monitore mit sichtbarem Vollbild-Fenster
+  meiden die Schafe. Wer dort ist, fällt auf einem freien Monitor neu ins Bild,
+  und am Rand zum Vollbild-Monitor kehren sie um. Ist kein Monitor frei, laufen
+  sie unsichtbar und klickdurchlässig dahinter weiter; nur der Eieruhr-Alarm
+  wird auch dann angezeigt
 - Klettert an der äußeren Bildschirmwand hoch, läuft kopfüber an der
   Bildschirmoberkante entlang und lässt sich gelegentlich fallen – so
   landet es von selbst wieder auf Fenstern; sonst klettert es an der

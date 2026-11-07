@@ -16,7 +16,7 @@ use crate::core::bubble::{self, BubblePlacement};
 use crate::core::fling::FlingTracker;
 use crate::core::geometry::Rect;
 use crate::core::sheep::{Beam, Facing, Sheep};
-use crate::core::surfaces::{walkable_surfaces, Surface};
+use crate::core::surfaces::{fullscreen_overlays, walkable_surfaces, Surface};
 use crate::core::world::World;
 use crate::desktop_files::{DesktopFile, ICON_PNG};
 use crate::platform::x11_windows;
@@ -829,6 +829,9 @@ fn build_ui<SpawnFn, TickFn>(
     let tick_cb = tick.clone();
     let overlays_tick = overlays.clone();
     let surfaces_tick = surfaces.clone();
+    // Pro Overlay: liegt es über einem sichtbaren Vollbild-Fenster?
+    let fullscreen: Rc<RefCell<Vec<bool>>> = Rc::new(RefCell::new(vec![false; mons.len()]));
+    let fullscreen_tick = fullscreen.clone();
     let last = Rc::new(RefCell::new(Instant::now()));
     // Zuletzt gesetzte Input-Region je Overlay – nur bei Änderung neu setzen.
     let mut last_input: Vec<Option<Vec<InputRect>>> = vec![None; mons.len()];
@@ -853,9 +856,11 @@ fn build_ui<SpawnFn, TickFn>(
             {
                 let mut s = sheeps_tick.borrow_mut();
                 let surf = surfaces_tick.borrow();
+                let fs = fullscreen_tick.borrow();
                 let world = World {
                     area_dims: &dims,
                     surfaces: &surf,
+                    fullscreen: &fs,
                 };
                 (tick_cb.borrow_mut())(&mut s, dt.max(1), &world);
             }
@@ -866,6 +871,7 @@ fn build_ui<SpawnFn, TickFn>(
             {
                 let all = sheeps_tick.borrow();
                 let ui = ui_tick.borrow();
+                let fs = fullscreen_tick.borrow();
                 for (idx, oh) in overlays_tick.borrow().iter().enumerate() {
                     let Some(a) = oh.area.upgrade() else {
                         continue;
@@ -875,7 +881,15 @@ fn build_ui<SpawnFn, TickFn>(
                     let mut beams = Vec::new();
                     let mut bubbles = Vec::new();
                     let mut input = Vec::new();
-                    for (i, s) in all.iter().enumerate().filter(|(_, s)| s.monitor_idx == idx) {
+                    // Über Vollbild-Fenstern bleibt das Overlay leer und
+                    // klickdurchlässig – nur der Eieruhr-Alarm kommt durch.
+                    // Hier sind Schafe nur, wenn kein Monitor frei ist.
+                    let hidden = fs.get(idx).copied().unwrap_or(false) && ui.alarm.is_none();
+                    for (i, s) in all
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, s)| s.monitor_idx == idx && !hidden)
+                    {
                         if let Some(p) = s.prop() {
                             let placed = Placed {
                                 key: (s.color, p.frame, p.mirrored),
@@ -942,7 +956,12 @@ fn build_ui<SpawnFn, TickFn>(
 
     // Fensteroberkanten als Laufflächen; im Tray-Menü abschaltbar.
     let walk_on_windows = Rc::new(Cell::new(settings.walk_on_windows));
-    start_window_poller(overlays.clone(), surfaces.clone(), walk_on_windows.clone());
+    start_window_poller(
+        overlays.clone(),
+        surfaces.clone(),
+        fullscreen,
+        walk_on_windows.clone(),
+    );
 
     // Mauszeiger: weckt schlafende Schafe und zeigt bei laufendem Timer,
     // über welchem Schaf die Restzeit-Blase erscheint.
@@ -1056,10 +1075,12 @@ fn build_ui<SpawnFn, TickFn>(
 /// auf stderr ausgegeben (zum Abgleich mit `wmctrl -lG` / `xprop`).
 ///
 /// Ist `enabled` aus, bleiben die Kanten leer – Schafe auf Fenstern fallen
-/// dann herunter wie bei einem weggezogenen Fenster.
+/// dann herunter wie bei einem weggezogenen Fenster. `fullscreen` wird
+/// unabhängig davon immer aktualisiert.
 fn start_window_poller(
     overlays: Rc<RefCell<Vec<OverlayHandle>>>,
     surfaces: Rc<RefCell<Vec<Vec<Surface>>>>,
+    fullscreen: Rc<RefCell<Vec<bool>>>,
     enabled: Rc<Cell<bool>>,
 ) {
     use gdk4_x11::prelude::*;
@@ -1080,14 +1101,6 @@ fn start_window_poller(
         std::time::Duration::from_millis(WINDOW_POLL_MS),
         move || {
             ticks = ticks.wrapping_add(1);
-            if !enabled.get() {
-                if surfaces.borrow().iter().any(|l| !l.is_empty()) {
-                    surfaces.borrow_mut().iter_mut().for_each(Vec::clear);
-                }
-                // Nach dem Wiedereinschalten sofort abfragen.
-                changing = true;
-                return glib::ControlFlow::Continue;
-            }
             if !changing && ticks % WINDOW_POLL_IDLE_EVERY != 0 {
                 return glib::ControlFlow::Continue;
             }
@@ -1132,14 +1145,22 @@ fn start_window_poller(
             };
             x11display.error_trap_pop_ignored();
 
-            let new_surfaces = walkable_surfaces(&windows, &overlay_rects);
+            let new_surfaces = if enabled.get() {
+                walkable_surfaces(&windows, &overlay_rects)
+            } else {
+                vec![Vec::new(); overlay_rects.len()]
+            };
+            let new_fullscreen = fullscreen_overlays(&windows, &overlay_rects);
             if debug {
                 let mut out = String::new();
                 for (o, r) in overlay_rects.iter().enumerate() {
-                    out += &format!("overlay {o}: {r:?}\n");
+                    out += &format!("overlay {o}: {r:?} vollbild={}\n", new_fullscreen[o]);
                 }
                 for (w, name) in windows.iter().zip(&names) {
-                    out += &format!("  win 0x{:08x} {:?} {name:?}\n", w.id, w.rect);
+                    out += &format!(
+                        "  win 0x{:08x} {:?} vollbild={} {name:?}\n",
+                        w.id, w.rect, w.fullscreen
+                    );
                 }
                 for (o, list) in new_surfaces.iter().enumerate() {
                     for e in list {
@@ -1158,6 +1179,7 @@ fn start_window_poller(
             if changing {
                 *surfaces.borrow_mut() = new_surfaces;
             }
+            *fullscreen.borrow_mut() = new_fullscreen;
             glib::ControlFlow::Continue
         },
     );
