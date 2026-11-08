@@ -187,6 +187,15 @@ pub enum AnimId {
     UfoBeam,
     /// Entführt: unsichtbar, bis das UFO davongeflogen ist.
     UfoGone,
+    /// eat + flower (id=26/27): eine Blume abgrasen, die neben dem Schaf steht.
+    EatFlower,
+    /// Frei komponiert: nach einem schnellen Wurf über den Boden rollen
+    /// (Kacheln 112–119, im Original ungenutzt).
+    Roll,
+    /// Ausrollen mit schwindeligem Blick (Kacheln 120–126).
+    RollSlow,
+    /// Mit Kreuzaugen benommen sitzen bleiben (Kachel 85).
+    RollDizzy,
 }
 
 pub struct AnimDef {
@@ -211,11 +220,12 @@ pub const WALK: AnimDef = AnimDef {
     dx_per_tick: 2,
     repeat: 6,
     next: &[
-        (61, AnimId::Walk),
+        (58, AnimId::Walk),
         (7, AnimId::YawnSleep),
         (5, AnimId::Sleep2Yawn),
         (5, AnimId::Sleep3Yawn),
         (6, AnimId::Eat),
+        (3, AnimId::EatFlower),
         (10, AnimId::RunBegin),
         (5, AnimId::Rotate1A),
         (1, AnimId::UfoArrive),
@@ -771,6 +781,57 @@ pub const UFO_GONE: AnimDef = AnimDef {
     flip_on_end: false,
 };
 
+/// Index des ersten Kau-Frames in `EAT_FLOWER`: Davor beißt das Schaf zu,
+/// ab hier fehlt der Blume das abgebissene Stück.
+pub const EAT_FLOWER_CHEW_IDX: usize = 4;
+
+/// EatFlower (id=26): Ein Durchlauf ist ein Bissen – Maul auf (58), Hals
+/// strecken und zubeißen (59), kauen (60/61). Vier Bissen führen durch die
+/// fünf Stadien der Blume, der fünfte frisst den kahlen Stängel (siehe
+/// `Sheep::update_prop`).
+pub const EAT_FLOWER: AnimDef = AnimDef {
+    frames: &[6, 58, 59, 59, 60, 61, 60, 61, 60, 61, 6],
+    interval_ms: 250,
+    dx_per_tick: 0,
+    repeat: 5,
+    next: &[(100, AnimId::Walk)],
+    flip_on_end: false,
+};
+
+/// Roll: zwei schnelle Umdrehungen. Die Kacheln drehen vorwärts gelesen im
+/// Uhrzeigersinn; das ungespiegelte Sprite rollt nach links, also rückwärts.
+/// `dx_per_tick` passt zum Umfang des Schafs, damit es nicht rutscht.
+pub const ROLL: AnimDef = AnimDef {
+    frames: &[119, 118, 117, 116, 115, 114, 113, 112],
+    interval_ms: 60,
+    dx_per_tick: 8,
+    repeat: 2,
+    next: &[(100, AnimId::RollSlow)],
+    flip_on_end: false,
+};
+
+/// RollSlow: eine letzte Umdrehung mit halbem Tempo.
+pub const ROLL_SLOW: AnimDef = AnimDef {
+    frames: &[
+        119, 119, 126, 126, 125, 125, 124, 124, 123, 123, 122, 122, 121, 121, 120, 120,
+    ],
+    interval_ms: 60,
+    dx_per_tick: 4,
+    repeat: 1,
+    next: &[(100, AnimId::RollDizzy)],
+    flip_on_end: false,
+};
+
+/// RollDizzy: Kreuzaugen, Augen zu, dann über Rotate1B zurück in die Laufrichtung.
+pub const ROLL_DIZZY: AnimDef = AnimDef {
+    frames: &[119, 85, 85, 85, 85, 85, 83, 119],
+    interval_ms: 200,
+    dx_per_tick: 0,
+    repeat: 1,
+    next: &[(100, AnimId::Rotate1B)],
+    flip_on_end: false,
+};
+
 pub fn def(id: AnimId) -> &'static AnimDef {
     match id {
         AnimId::Walk => &WALK,
@@ -825,6 +886,10 @@ pub fn def(id: AnimId) -> &'static AnimDef {
         AnimId::UfoSpotted => &UFO_SPOTTED,
         AnimId::UfoBeam => &UFO_BEAM,
         AnimId::UfoGone => &UFO_GONE,
+        AnimId::EatFlower => &EAT_FLOWER,
+        AnimId::Roll => &ROLL,
+        AnimId::RollSlow => &ROLL_SLOW,
+        AnimId::RollDizzy => &ROLL_DIZZY,
     }
 }
 

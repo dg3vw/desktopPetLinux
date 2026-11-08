@@ -1,4 +1,4 @@
-use super::anim::{def, pick_next, AnimId, Rng, SpriteColor, TILE_H, TILE_W};
+use super::anim::{def, pick_next, AnimId, Rng, SpriteColor, EAT_FLOWER_CHEW_IDX, TILE_H, TILE_W};
 use super::geometry::GroundSegment;
 use super::surfaces::{Surface, WindowId};
 use super::world::World;
@@ -78,6 +78,15 @@ const UFO_FADE_PX: f32 = 22.0;
 /// Abflug: seitlich (px/s) und nach oben beschleunigend (px/s²).
 const UFO_FLEE_VX: f32 = 90.0;
 const UFO_FLEE_ACCEL: f32 = 600.0;
+/// Abstand der Blume zum Schaf in Blickrichtung (Original: imageW*0.9).
+const FLOWER_OFFSET: f32 = TILE_W as f32 * 0.9;
+/// Die Stadien der Blume, von voll erblüht bis zum kahlen Stängel.
+const FLOWER_STAGES: [u32; 5] = [153, 149, 150, 151, 152];
+/// Ab dieser Wurfgeschwindigkeit (Pixel pro Sekunde, seitlich) rollt das
+/// Schaf nach der Landung weiter.
+const ROLL_MIN_VX: f32 = 700.0;
+/// Schwung beim Herunterrollen von einer Fensterkante (Pixel pro Sekunde).
+const ROLL_OFF_VX: f32 = 130.0;
 
 /// Wie ein Schaf (neu) ins Bild kommt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +100,8 @@ pub enum Entry {
     Visit,
     /// Steht schon am Boden, und gleich kommt das UFO (zum Ausprobieren).
     Ufo,
+    /// Steht schon am Boden und frisst eine Blume (zum Ausprobieren).
+    Flower,
 }
 
 impl Entry {
@@ -100,6 +111,7 @@ impl Entry {
             "bath" => Self::Bath,
             "visit" => Self::Visit,
             "ufo" => Self::Ufo,
+            "flower" => Self::Flower,
             _ => return None,
         })
     }
@@ -110,10 +122,12 @@ enum PropKind {
     Tub,
     BlackSheep,
     Ufo,
+    Flower,
 }
 
 /// Zweites Sprite, das zu einem Schaf gehört (Original: `child`) – die
-/// Badewanne, das schwarze Schaf oder das UFO. Liegt auf demselben Monitor.
+/// Badewanne, das schwarze Schaf, das UFO oder die Blume. Liegt auf demselben
+/// Monitor.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Prop {
     pub x: f32,
@@ -189,6 +203,8 @@ pub struct Sheep {
     /// Landeanimation des laufenden Falls; `None` = zufällig FallHard/Boing
     /// mit vorherigem Nachfedern.
     land_anim: Option<AnimId>,
+    /// Schnell geworfen: rollt nach der Landung weiter.
+    roll_on_land: bool,
     /// Läuft gerade aus dem Bild, um danach von oben neu hereinzufallen.
     leaving: bool,
     /// Auftritt, der beim ersten Tick mit bekannten Overlay-Maßen startet.
@@ -232,6 +248,7 @@ impl Sheep {
             support: None,
             hang_offset: 0.0,
             land_anim: None,
+            roll_on_land: false,
             leaving: false,
             pending_entry: None,
             prop: None,
@@ -263,8 +280,8 @@ impl Sheep {
         self.pending_entry = Some(entry);
     }
 
-    /// Badewanne, schwarzes Schaf oder UFO, falls gerade sichtbar – wird
-    /// vor dem Schaf gezeichnet, außer `Prop::in_front`.
+    /// Badewanne, schwarzes Schaf, UFO oder Blume, falls gerade sichtbar –
+    /// wird vor dem Schaf gezeichnet, außer `Prop::in_front`.
     pub fn prop(&self) -> Option<&Prop> {
         self.prop.as_ref()
     }
@@ -391,6 +408,8 @@ impl Sheep {
                     | AnimId::Sleep3
                     | AnimId::Sleep3Wake
                     | AnimId::Eat
+                    | AnimId::EatFlower
+                    | AnimId::RollDizzy
                     | AnimId::RunBegin
                     | AnimId::Run
                     | AnimId::RunEnd
@@ -424,12 +443,14 @@ impl Sheep {
 
     /// User hat losgelassen: fliegt mit dem Schwung der Mausbewegung
     /// `(vx, vy)` (Pixel pro Sekunde) im Bogen weiter, fällt, bounct, landet –
-    /// auf dem Boden oder auf einer Fensterkante darunter.
+    /// auf dem Boden oder auf einer Fensterkante darunter. Nach einem schnellen
+    /// Wurf rollt es dort weiter.
     pub fn end_drag(&mut self, vx: f32, vy: f32) {
         self.dragged = false;
         self.set_anim(AnimId::Fall);
         self.vx = vx;
         self.vy = vy;
+        self.roll_on_land = vx.abs() >= ROLL_MIN_VX;
         if vx.abs() > 50.0 {
             self.facing = if vx > 0.0 {
                 Facing::Right
@@ -513,6 +534,11 @@ impl Sheep {
         if self.alarm && self.can_start_alarm() {
             self.set_anim(AnimId::Alarm);
         }
+        // Nur zu Beginn pflanzen – nach dem letzten Bissen ist die Blume
+        // aufgefressen und soll nicht nachwachsen.
+        if self.anim == AnimId::EatFlower && self.repeats_done == 0 && !self.has_flower() {
+            self.plant_flower(world);
+        }
         match self.anim {
             AnimId::Surprised => {
                 // Hängt verdutzt in der Luft – weder Bewegung noch Boden-Snap.
@@ -570,6 +596,9 @@ impl Sheep {
             let dx = self.step_px(dt_ms) * self.forward();
             self.x += dx;
             match seg {
+                _ if matches!(self.anim, AnimId::Roll | AnimId::RollSlow) => {
+                    self.check_roll_edge(seg.as_ref(), segments, world);
+                }
                 Some(s) => self.check_window_edge(&s),
                 None => {
                     if self.check_floor_edge(segments, world) {
@@ -695,11 +724,49 @@ impl Sheep {
                 self.y = floor;
                 self.set_anim(AnimId::UfoArrive);
             }
+            Entry::Flower if aw > 3 * TILE_W as i32 => {
+                // Mit Abstand zu den Wänden, damit die Blume ganz ins Bild passt.
+                let span = aw - 3 * TILE_W as i32;
+                self.x = (TILE_W + self.rng.range(span.max(1) as u32)) as f32;
+                self.y = floor;
+                self.set_anim(AnimId::EatFlower);
+            }
             _ => {
                 let x = self.rng.range((aw - TILE_W as i32).max(1) as u32) as f32;
                 self.drop_in(idx, x);
             }
         }
+    }
+
+    fn has_flower(&self) -> bool {
+        self.prop.is_some_and(|p| p.kind == PropKind::Flower)
+    }
+
+    /// Stellt die Blume vor das Schaf. Passt sie nicht auf die Standfläche
+    /// oder ist noch ein anderes Prop zu sehen, wird nur Gras gefressen.
+    fn plant_flower(&mut self, world: &World) {
+        let flower_x = self.x + self.forward() * FLOWER_OFFSET;
+        let area = match self.support {
+            Some(window) => self
+                .find_support(window, world)
+                .map(|s| (s.x_start as f32, s.x_end as f32)),
+            None => Some((0.0, world.dims(self.monitor_idx).0 as f32)),
+        };
+        let fits =
+            area.is_some_and(|(left, right)| flower_x >= left && flower_x + TILE_W as f32 <= right);
+        if !fits || self.prop.is_some() {
+            self.set_anim(AnimId::Eat);
+            return;
+        }
+        let mirrored = self.facing == Facing::Right;
+        self.prop = Some(Prop::new(
+            PropKind::Flower,
+            flower_x,
+            self.y,
+            FLOWER_STAGES[0],
+            mirrored,
+        ));
+        self.prop_ttl_ms = None;
     }
 
     /// Meteor-Flug: diagonal nach unten, bis die Wanne erreicht ist.
@@ -753,6 +820,10 @@ impl Sheep {
 
     /// Prop an den Zustand des Schafs anpassen und ggf. ablaufen lassen.
     fn update_prop(&mut self, dt_ms: u32) {
+        // Beim Fressen gestört: Die angeknabberte Blume blendet aus.
+        if self.has_flower() && self.anim != AnimId::EatFlower && self.prop_ttl_ms.is_none() {
+            self.prop_ttl_ms = Some(FADE_MS);
+        }
         if let Some(ttl) = self.prop_ttl_ms {
             let left = ttl.saturating_sub(dt_ms);
             if left == 0 {
@@ -766,7 +837,9 @@ impl Sheep {
         let idx = self.frame_idx;
         let ttl = self.prop_ttl_ms;
         let white_x = self.x;
+        let white_y = self.y;
         let meet = self.meet_x;
+        let bites = self.repeats_done as usize + usize::from(idx >= EAT_FLOWER_CHEW_IDX);
         let progress = self.anim_progress();
         let (from, hover) = (self.ufo_from, self.ufo_hover);
         let Some(p) = self.prop.as_mut() else { return };
@@ -829,6 +902,22 @@ impl Sheep {
                     158
                 };
                 p.frame = base + (p.age_ms / 100) % 4;
+            }
+            PropKind::Flower => {
+                if anim == AnimId::EatFlower {
+                    // Der letzte Bissen nimmt den kahlen Stängel mit.
+                    if bites >= FLOWER_STAGES.len() {
+                        self.prop = None;
+                        return;
+                    }
+                    // Jeder Bissen nimmt der Blume ein Stück, sobald das Schaf kaut.
+                    p.frame = FLOWER_STAGES[bites.min(FLOWER_STAGES.len() - 1)];
+                    // Wird das Fenster angehoben, kommt die Blume mit.
+                    p.y = white_y;
+                }
+                let fade_in = p.age_ms as f32 / FADE_MS as f32;
+                let fade_out = ttl.map_or(1.0, |t| t as f32 / FADE_MS as f32);
+                p.alpha = fade_in.min(fade_out).min(1.0);
             }
         }
     }
@@ -1032,6 +1121,52 @@ impl Sheep {
         self.set_anim(next);
     }
 
+    /// Beim Rollen an einer Kante: Über einen Abgrund kullert das Schaf hinweg
+    /// und fällt, gegen eine Wand knallt es. Am Boden rollt es auch auf den
+    /// Nachbarmonitor weiter.
+    fn check_roll_edge(
+        &mut self,
+        seg: Option<&Surface>,
+        segments: &[GroundSegment],
+        world: &World,
+    ) {
+        let Some(seg) = seg else {
+            let (aw, _) = world.dims(self.monitor_idx);
+            let max_x = (aw - TILE_W as i32).max(0) as f32;
+            if (self.x <= 0.0 || self.x >= max_x) && !self.try_cross(segments, world, self.facing) {
+                self.x = self.x.clamp(0.0, max_x);
+                self.set_anim(AnimId::WallRam);
+            }
+            return;
+        };
+        let half = TILE_W as f32 / 2.0;
+        let cx = self.x + half;
+        let (at_edge, drop, wall_cx) = match self.facing {
+            Facing::Right => (
+                cx >= seg.x_end as f32,
+                seg.right_is_drop(),
+                seg.x_end as f32 - EDGE_MARGIN,
+            ),
+            Facing::Left => (
+                cx <= seg.x_start as f32,
+                seg.left_is_drop(),
+                seg.x_start as f32 + EDGE_MARGIN,
+            ),
+        };
+        if !at_edge {
+            return;
+        }
+        if drop {
+            let fwd = self.forward();
+            self.set_anim(AnimId::FallPanic);
+            // Ohne Schwung landete es sofort wieder auf derselben Kante.
+            self.vx = fwd * ROLL_OFF_VX;
+        } else {
+            self.x = wall_cx - half;
+            self.set_anim(AnimId::WallRam);
+        }
+    }
+
     /// Am Boden: Monitorwechsel, Umdrehen oder aus dem Bild laufen.
     /// Rückgabe: true, wenn das Schaf ganz draußen war und neu aufgetreten ist.
     fn check_floor_edge(&mut self, segments: &[GroundSegment], world: &World) -> bool {
@@ -1181,6 +1316,7 @@ impl Sheep {
         self.vx = 0.0;
         self.vy = 0.0;
         self.land_anim = land_anim;
+        self.roll_on_land = false;
     }
 
     /// Advance frames der aktuellen Animation ohne jegliche Zustandsübergänge.
@@ -1259,17 +1395,27 @@ impl Sheep {
             return;
         }
 
-        // Endgültig gelandet. Ohne vorgegebene Landeanimation zufällig
+        // Endgültig gelandet. Nach einem schnellen Wurf in Flugrichtung
+        // weiterrollen, sonst ohne vorgegebene Landeanimation zufällig
         // FallHard, das elastischere Boing oder FallSoft, damit Landungen
         // abwechslungsreich aussehen.
+        if self.roll_on_land {
+            self.facing = if self.vx > 0.0 {
+                Facing::Right
+            } else {
+                Facing::Left
+            };
+        }
         self.falling = false;
         self.vx = 0.0;
         self.vy = 0.0;
         self.support = seg.map(|s| s.window);
         let next = match self.land_anim.take() {
             Some(a) => a,
+            None if self.roll_on_land => AnimId::Roll,
             None => [AnimId::FallHard, AnimId::Boing, AnimId::FallSoft][self.rng.range(3) as usize],
         };
+        self.roll_on_land = false;
         self.set_anim(next);
     }
 
@@ -2322,6 +2468,304 @@ mod tests {
         s.end_drag(0.0, 0.0);
         s.tick(16, &SEGS2, &world);
         assert_eq!(s.monitor_idx, 1);
+    }
+
+    /// Schaf, das bei `x` auf dem Boden steht und in die Blume beißt.
+    fn eating_flower(x: f32, facing: Facing, world: &World) -> Sheep {
+        let mut s = Sheep::new_at(0, x, 11);
+        tick_until_landed(&mut s, world, 16);
+        s.x = x;
+        s.facing = facing;
+        s.set_anim(AnimId::EatFlower);
+        s.tick(16, &SEGS, world);
+        s
+    }
+
+    #[test]
+    fn flower_is_eaten_stage_by_stage_including_stem() {
+        let none: Vec<Vec<Surface>> = vec![Vec::new()];
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &none,
+            fullscreen: &[],
+        };
+        let mut s = eating_flower(500.0, Facing::Left, &world);
+        let flower = s.prop().copied().unwrap();
+        assert_eq!((flower.x, flower.y), (464.0, 1040.0));
+        assert!(!flower.mirrored);
+        assert!(!flower.in_front());
+
+        let mut seen = vec![flower.frame];
+        let mut stem_eaten = false;
+        let mut sheep_frame = s.current_frame();
+        while s.anim == AnimId::EatFlower {
+            let before = sheep_frame;
+            s.tick(16, &SEGS, &world);
+            sheep_frame = s.current_frame();
+            match s.prop() {
+                Some(p) => {
+                    assert!(!stem_eaten, "aufgefressene Blume wächst nicht nach");
+                    if seen.last() != Some(&p.frame) {
+                        seen.push(p.frame);
+                        // Erst zubeißen (59), beim ersten Kauen (60) fehlt das Stück.
+                        assert_eq!((before, sheep_frame), (59, 60));
+                    }
+                }
+                None if !stem_eaten => {
+                    stem_eaten = true;
+                    // Auch der Stängel verschwindet mit dem ersten Kauen.
+                    assert_eq!((before, sheep_frame), (59, 60));
+                    assert_eq!(seen, FLOWER_STAGES);
+                }
+                None => {}
+            }
+        }
+        assert!(stem_eaten, "der fünfte Bissen frisst den Stängel");
+        assert_eq!(s.anim, AnimId::Walk);
+        assert!(s.prop().is_none());
+    }
+
+    #[test]
+    fn flower_stands_in_front_of_right_facing_sheep() {
+        let none: Vec<Vec<Surface>> = vec![Vec::new()];
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &none,
+            fullscreen: &[],
+        };
+        let s = eating_flower(500.0, Facing::Right, &world);
+        let flower = s.prop().unwrap();
+        assert_eq!(flower.x, 536.0);
+        assert!(flower.mirrored);
+    }
+
+    #[test]
+    fn no_room_for_flower_means_plain_grass() {
+        let none: Vec<Vec<Surface>> = vec![Vec::new()];
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &none,
+            fullscreen: &[],
+        };
+        for (x, facing) in [(10.0, Facing::Left), (1870.0, Facing::Right)] {
+            let s = eating_flower(x, facing, &world);
+            assert_eq!(s.anim, AnimId::Eat);
+            assert!(s.prop().is_none());
+        }
+    }
+
+    #[test]
+    fn flower_must_fit_on_the_window() {
+        let surfaces = vec![vec![surface(1, 100, 900, 300)]];
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &surfaces,
+            fullscreen: &[],
+        };
+        for (x, grows) in [(500.0, true), (110.0, false)] {
+            let mut s = Sheep::new_at(0, x, 5);
+            tick_until_landed(&mut s, &world, 16);
+            assert_eq!(s.support_window(), Some(1));
+            s.x = x;
+            s.facing = Facing::Left;
+            s.set_anim(AnimId::EatFlower);
+            s.tick(16, &SEGS, &world);
+            assert_eq!(s.prop().is_some(), grows, "x={x}");
+            if let Some(p) = s.prop() {
+                assert_eq!(p.y, 260.0);
+            }
+        }
+    }
+
+    #[test]
+    fn disturbed_flower_goes_away() {
+        let none: Vec<Vec<Surface>> = vec![Vec::new()];
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &none,
+            fullscreen: &[],
+        };
+        let mut dragged = eating_flower(500.0, Facing::Left, &world);
+        dragged.start_drag();
+        assert!(dragged.prop().is_none());
+
+        let mut alarmed = eating_flower(500.0, Facing::Left, &world);
+        alarmed.set_alarm(true);
+        for _ in 0..(FADE_MS / 16 + 2) {
+            alarmed.tick(16, &SEGS, &world);
+        }
+        assert_eq!(alarmed.anim, AnimId::Alarm);
+        assert!(alarmed.prop().is_none());
+    }
+
+    /// Tickt, bis das Schaf nach dem Wurf rollt oder anders gelandet ist.
+    fn thrown(x: f32, vx: f32, world: &World) -> Sheep {
+        let mut s = Sheep::new_at(0, x, 21);
+        tick_until_landed(&mut s, world, 16);
+        s.start_drag();
+        s.set_pos(0, x, 800.0);
+        s.end_drag(vx, 0.0);
+        tick_until_landed(&mut s, world, 16);
+        s
+    }
+
+    #[test]
+    fn fast_throw_rolls_on_in_flight_direction() {
+        let none: Vec<Vec<Surface>> = vec![Vec::new()];
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &none,
+            fullscreen: &[],
+        };
+        for (x, vx, facing) in [
+            (100.0, 1200.0, Facing::Right),
+            (1500.0, -1200.0, Facing::Left),
+        ] {
+            let mut s = thrown(x, vx, &world);
+            assert_eq!(s.anim, AnimId::Roll);
+            assert_eq!(s.facing, facing);
+
+            let start = s.x;
+            tick_while(&mut s, &world, |s| s.anim != AnimId::Walk);
+            // 2 schnelle + 1 langsame Umdrehung, je gut 125 px Umfang.
+            let rolled = (s.x - start) * s.forward();
+            assert!((300.0..450.0).contains(&rolled), "gerollt: {rolled}");
+            assert_eq!(s.facing, facing);
+        }
+    }
+
+    #[test]
+    fn roll_passes_through_slow_and_dizzy_phases() {
+        let none: Vec<Vec<Surface>> = vec![Vec::new()];
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &none,
+            fullscreen: &[],
+        };
+        let mut s = thrown(100.0, 1200.0, &world);
+        let mut seen = vec![s.anim];
+        while s.anim != AnimId::Walk {
+            s.tick(16, &SEGS, &world);
+            if seen.last() != Some(&s.anim) {
+                seen.push(s.anim);
+            }
+        }
+        assert_eq!(
+            seen,
+            [
+                AnimId::Roll,
+                AnimId::RollSlow,
+                AnimId::RollDizzy,
+                AnimId::Rotate1B,
+                AnimId::Walk
+            ]
+        );
+    }
+
+    #[test]
+    fn slow_throw_does_not_roll() {
+        let none: Vec<Vec<Surface>> = vec![Vec::new()];
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &none,
+            fullscreen: &[],
+        };
+        for vx in [0.0, 300.0, -300.0] {
+            let s = thrown(500.0, vx, &world);
+            assert_ne!(s.anim, AnimId::Roll, "vx={vx}");
+        }
+    }
+
+    #[test]
+    fn rolling_into_screen_wall_hurts() {
+        let none: Vec<Vec<Surface>> = vec![Vec::new()];
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &none,
+            fullscreen: &[],
+        };
+        let mut s = Sheep::new_at(0, 1850.0, 2);
+        tick_until_landed(&mut s, &world, 16);
+        s.x = 1850.0;
+        s.facing = Facing::Right;
+        s.set_anim(AnimId::Roll);
+        tick_while(&mut s, &world, |s| s.anim == AnimId::Roll);
+        assert_eq!(s.anim, AnimId::WallRam);
+        assert_eq!(s.x, 1880.0);
+    }
+
+    #[test]
+    fn rolling_stops_at_fullscreen_monitor_and_crosses_free_one() {
+        let none: Vec<Vec<Surface>> = vec![Vec::new(); 2];
+        for (fullscreen, expected) in [([false, true], 0), ([false, false], 1)] {
+            let world = World {
+                area_dims: &DIMS2,
+                surfaces: &none,
+                fullscreen: &fullscreen,
+            };
+            let mut s = Sheep::new_at(0, 1830.0, 4);
+            for _ in 0..600 {
+                s.tick(16, &SEGS2, &world);
+                if !s.falling {
+                    break;
+                }
+            }
+            s.x = 1830.0;
+            s.facing = Facing::Right;
+            s.set_anim(AnimId::Roll);
+            for _ in 0..20 {
+                s.tick(16, &SEGS2, &world);
+            }
+            assert_eq!(s.monitor_idx, expected, "{fullscreen:?}");
+        }
+    }
+
+    #[test]
+    fn rolling_off_window_edge_falls_to_floor() {
+        let surfaces = vec![vec![surface(1, 100, 900, 300)]];
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &surfaces,
+            fullscreen: &[],
+        };
+        let mut s = Sheep::new_at(0, 800.0, 9);
+        tick_until_landed(&mut s, &world, 16);
+        assert_eq!(s.support_window(), Some(1));
+        s.x = 860.0;
+        s.facing = Facing::Right;
+        s.set_anim(AnimId::Roll);
+        tick_while(&mut s, &world, |s| s.anim == AnimId::Roll);
+        assert!(s.falling);
+        tick_until_landed(&mut s, &world, 16);
+        assert_eq!(s.support_window(), None);
+        assert_eq!(s.y, 1040.0);
+    }
+
+    #[test]
+    fn rolling_into_occluding_window_hurts() {
+        // Rechts verdeckt ein höheres Fenster die Kante: dort ist eine Wand.
+        let edge = Surface {
+            window: 1,
+            x_start: 100,
+            x_end: 600,
+            y: 300,
+            win_x: 100,
+            win_right: 900,
+        };
+        let surfaces = vec![vec![edge]];
+        let world = World {
+            area_dims: &DIMS,
+            surfaces: &surfaces,
+            fullscreen: &[],
+        };
+        let mut s = Sheep::new_at(0, 400.0, 9);
+        tick_until_landed(&mut s, &world, 16);
+        s.x = 560.0;
+        s.facing = Facing::Right;
+        s.set_anim(AnimId::Roll);
+        tick_while(&mut s, &world, |s| s.anim == AnimId::Roll);
+        assert_eq!(s.anim, AnimId::WallRam);
+        assert_eq!(s.support_window(), Some(1));
     }
 
     /// Tickt, solange `still` gilt (max. 20 s Simulationszeit).

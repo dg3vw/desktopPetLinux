@@ -32,6 +32,11 @@ unterstützt.
   im Lichtkegel nach oben; das UFO fliegt davon, und kurz darauf kommt das
   Schaf wieder ins Bild. Wer das Schaf rechtzeitig aus dem Strahl zieht,
   rettet es – dann fliegt das UFO ohne Beute ab
+- Frisst gelegentlich eine Blume Bissen für Bissen ab: Maul auf, zubeißen,
+  kauen – bis zuletzt auch der Stängel verputzt ist
+- Rollt nach einem schnellen Wurf über den Boden und bleibt kurz benommen
+  sitzen; rollt es gegen eine Wand, tut das weh, über eine Fensterkante
+  kullert es hinunter
 - Grasen, Gähnen/Schlafen, Sitzen/Dösen, von vorn sitzend schlafen –
   Mausbewegung weckt schlafende Schafe
 - Schaf mit der Maus packen und wegziehen, auch über Monitorgrenzen; beim
@@ -103,7 +108,8 @@ erkannten Fenster und begehbaren Kanten auf stderr aus.
 Die seltenen Auftritte lassen sich direkt beim Start erzwingen:
 `DESKTOP_SHEEP_ENTRY=bath` (Meteor in die Badewanne) bzw.
 `DESKTOP_SHEEP_ENTRY=visit` (schwarzes Schaf) bzw.
-`DESKTOP_SHEEP_ENTRY=ufo` (UFO-Entführung).
+`DESKTOP_SHEEP_ENTRY=ufo` (UFO-Entführung) bzw.
+`DESKTOP_SHEEP_ENTRY=flower` (Blume fressen).
 `DESKTOP_SHEEP_TIMER=<sekunden>` startet gleich beim Start einen Timer.
 
 ## Tests
